@@ -28,7 +28,8 @@ server library and backed by Postgres.
 | **Grouping** | Agents map to a group by explicit assignment or a **label selector**; otherwise the default group. |
 | **Packages** | Upload agent binaries/addons, assign to groups, offer via OpAMP `PackagesAvailable`; agents download & report `PackageStatuses`. |
 | **Observability** | Event log of every connect/disconnect/config-apply/failure; `/healthz` + `/readyz`. |
-| **Security** | Optional bearer-token auth for agents (`OPAMP_AUTH_TOKEN`) and for mutating admin calls (`ADMIN_AUTH_TOKEN`). |
+| **Fleet operations** | Install / preflight / repair / upgrade / uninstall the OpsRamp agent across a VM fleet over **agentless SSH** (IP / CIDR / range targets, jump-host support), plus continuous drift **reconciliation**. See [Fleet operations](#fleet-operations-agent-lifecycle-over-ssh). |
+| **Security** | Optional bearer-token auth for agents (`OPAMP_AUTH_TOKEN`) and for mutating admin calls (`ADMIN_AUTH_TOKEN`). SSH credentials live only in memory for a run and are never persisted; host keys are pinned TOFU. |
 
 ## Quick start
 
@@ -76,6 +77,8 @@ deploy/Dockerfile    Multi-target static build (distroless runtime)
 | `DEFAULT_GROUP` | `default` | fallback group |
 | `OPAMP_AUTH_TOKEN` | *(empty)* | if set, agents must send `Authorization: Bearer …` |
 | `ADMIN_AUTH_TOKEN` | *(empty)* | if set, mutating admin calls need the bearer token |
+| `DEPLOY_STATE_DIR` | `/var/lib/orchestrator` | holds the TOFU `known_hosts` store for SSH fleet operations |
+| `DEPLOY_CONCURRENCY` | `10` | max hosts operated on in parallel per job |
 | `LOG_LEVEL` | `info` | debug/info/warn/error |
 
 ## Admin API
@@ -173,7 +176,147 @@ Mapping of the documented `/v2/api/agents` surface → client methods lives in
 `internal/opsramp/api.go`; OAuth + transport in `internal/opsramp/client.go`;
 the inventory poller in `internal/opsramp/poller.go`.
 
-## How reconciliation works
+## Fleet operations (agent lifecycle over SSH)
+
+Beyond *monitoring* OpsRamp agents, the orchestrator can **act on the fleet** —
+installing and managing the OpsRamp agent across many VMs at once over
+**agentless SSH** (a self-contained Go fan-out; no Ansible or external tooling).
+Everything is one pipeline distinguished by an **action**:
+
+| Action | What it does | Needs connector? |
+|--------|--------------|------------------|
+| `preflight` | Read-only readiness probe per host: OS/arch, `sudo`, existing agent, root disk free, OpsRamp API reachability. Changes nothing. | no |
+| `install` | Fetches OpsRamp `deployAgent.sh` (`scriptType=SHELL`) and runs it over SSH. | **yes** |
+| `repair` | Re-runs the installer on hosts whose agent is **down** (restores it). | **yes** |
+| `upgrade` | Re-runs the installer on hosts **behind the newest fleet version**. | **yes** |
+| `uninstall` | Removes the agent (`dpkg -P` / `rpm -e` → `rm -rf /opt/opsramp/agent`); optionally **deregisters** the resource from OpsRamp. | only if deregistering |
+
+A background **reconcile engine** continuously evaluates the inventory for down
+and version-drifted agents and surfaces remediation **recommendations**
+(approval-gated — applying one opens a targeted operation where you supply SSH
+credentials, which are never stored).
+
+### Setup from scratch
+
+**1 — Bring up the stack.**
+
+```bash
+cd /opt/opamp-orchestrator
+make up                                  # postgres + orchestrator
+open http://localhost:4777               # dashboard (compose maps host 4777 → :8080)
+```
+
+**2 — Configure the OpsRamp connector** (required for install/repair/upgrade and
+for inventory/reconcile). Either set the env vars from the [OpsRamp connector](#opsramp-connector)
+section before `make up`, or do it live in the dashboard: **Inventory → Settings →
+Save & connect**. Confirm with:
+
+```bash
+curl -s http://localhost:4777/api/v1/opsramp/status      # {"configured":true,"authenticated":true,...}
+```
+
+**3 — Get the agent install keys.** The installer's `-K` / `-S` are the **agent
+access & security keys of an OpsRamp *Installed Integration*** — these are *not*
+the REST OAuth `OPSRAMP_CLIENT_KEY/SECRET`. In OpsRamp: **Setup → Integrations →
+(your agent integration)** to obtain:
+
+- **`-K` access key** and **`-S` security key** (the agent's registration keys)
+- **`-F` integration id**, e.g. `INTG-7a2a63b1-…` (also visible per host in the
+  inventory as `attributes.installedIntgId`)
+
+The API host (`-s`) is taken automatically from the connector's `OPSRAMP_API_URL`.
+The final command the orchestrator runs on each host is exactly:
+
+```
+sh deployAgent.sh -K <accessKey> -S <securityKey> -s <api-host> -F <INTG-id> -L true
+```
+
+**4 — Ensure SSH reachability.** You need an SSH user with `sudo` (password or
+private key) on the targets. For private-subnet hosts, use a **jump host**
+(bastion). Host keys are pinned on first use (TOFU) in `DEPLOY_STATE_DIR/known_hosts`.
+
+**5 — Dry-run with preflight, then install.** From the dashboard's **Fleet
+Operations** view, or via the API below. Always preflight first.
+
+### Deploy API
+
+```
+POST /api/v1/deploy                 start an operation (returns the job)
+GET  /api/v1/deploy/jobs            recent jobs (with per-action badges)
+GET  /api/v1/deploy/jobs/{id}       job detail incl. per-host results
+GET  /api/v1/reconcile              fleet drift report + remediation recommendations
+```
+
+`POST /api/v1/deploy` body (fields used depend on `action`):
+
+```jsonc
+{
+  "action": "install",              // install|preflight|repair|upgrade|uninstall (default install)
+  "targets": "10.0.0.10-10.0.0.20, 192.168.1.0/28, web-01.internal",
+  "ssh_user": "root",
+  "ssh_password": "…",              // or ssh_private_key (+ ssh_key_passphrase)
+  "port": 22,
+  "use_sudo": true,
+
+  // install / repair / upgrade:
+  "agent_key": "…",                 // -K  (Installed Integration access key)
+  "agent_secret": "…",              // -S  (Installed Integration security key)
+  "integration_id": "INTG-…",       // -F
+  "enable_log_mgmt": true,          // -L true
+
+  // uninstall:
+  "deregister": false,              // also delete the resource from OpsRamp
+  "uninstall_command": "",          // optional override of auto-detection
+
+  // optional jump host (any action):
+  "bastion_host": "", "bastion_user": "", "bastion_password": "",
+  "bastion_private_key": "", "bastion_port": 22
+}
+```
+
+**Targets** accept comma / whitespace / newline-separated tokens: single IPs or
+hostnames, CIDR blocks (`10.0.0.0/28`), and ranges (`10.0.0.10-10.0.0.20` or the
+short form `10.0.0.10-20`). Capped at 1024 hosts per job.
+
+### Examples
+
+```bash
+BASE=http://localhost:4777
+
+# 1) Preflight a subnet (read-only) — check what would happen before installing
+curl -sX POST $BASE/api/v1/deploy -H 'content-type: application/json' -d '{
+  "action":"preflight","targets":"10.0.0.0/28","ssh_user":"ubuntu","ssh_password":"…"}'
+
+# 2) Install across a range
+curl -sX POST $BASE/api/v1/deploy -H 'content-type: application/json' -d '{
+  "action":"install","targets":"10.0.0.10-10.0.0.20","ssh_user":"root","ssh_password":"…",
+  "agent_key":"<-K>","agent_secret":"<-S>","integration_id":"INTG-…","enable_log_mgmt":true}'
+
+# 3) See what needs remediation, then repair the down agents
+curl -s $BASE/api/v1/reconcile        # -> {"down":1,"outdated":47,"recommendations":[{"action":"repair","target_spec":"…"}, …]}
+curl -sX POST $BASE/api/v1/deploy -H 'content-type: application/json' -d '{
+  "action":"repair","targets":"10.0.0.13","ssh_user":"root","ssh_password":"…",
+  "agent_key":"<-K>","agent_secret":"<-S>","integration_id":"INTG-…"}'
+
+# 4) Uninstall + decommission (removes the agent AND the OpsRamp resource)
+curl -sX POST $BASE/api/v1/deploy -H 'content-type: application/json' -d '{
+  "action":"uninstall","targets":"10.0.0.15","ssh_user":"root","ssh_password":"…","deregister":true}'
+
+# 5) Install through a bastion into a private subnet
+curl -sX POST $BASE/api/v1/deploy -H 'content-type: application/json' -d '{
+  "action":"install","targets":"10.20.0.0/28","ssh_user":"ec2-user","ssh_private_key":"…",
+  "agent_key":"<-K>","agent_secret":"<-S>","integration_id":"INTG-…",
+  "bastion_host":"bastion.example.com","bastion_user":"ec2-user","bastion_private_key":"…"}'
+```
+
+Poll a job's per-host results with `GET /api/v1/deploy/jobs/{id}`; preflight jobs
+report each check (reachable / sudo / agent / opsramp / disk) as pass·warn·fail.
+
+Implementation: SSH fan-out, TOFU host keys, and per-action command building live
+in `internal/deploy`; the reconcile engine (version drift + down detection) in
+`internal/reconcile`.
+
+## How OpAMP config reconciliation works
 
 1. Each `AgentToServer` message is persisted (identity, health, effective config,
    remote-config status, package status).
