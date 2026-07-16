@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 )
 
 func (s *Server) handleListPackages(w http.ResponseWriter, r *http.Request) {

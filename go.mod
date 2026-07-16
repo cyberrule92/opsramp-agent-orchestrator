@@ -1,4 +1,4 @@
-module github.com/opsramp/opamp-orchestrator
+module github.com/opsramp/opsramp-agent-orchestrator
 
 go 1.25.0
 

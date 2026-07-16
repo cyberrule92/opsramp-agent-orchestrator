@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 )
 
 // Store is the persistence the deploy Manager needs.

@@ -7,7 +7,7 @@ import (
 
 	"github.com/open-telemetry/opamp-go/protobufs"
 	"github.com/open-telemetry/opamp-go/server/types"
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 )
 
 // ErrNotConnected is returned when a push targets an agent with no live

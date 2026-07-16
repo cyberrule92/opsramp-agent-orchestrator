@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 )
 
 func TestCompareVersion(t *testing.T) {

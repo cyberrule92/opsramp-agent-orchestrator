@@ -5,7 +5,7 @@ package store
 import (
 	"context"
 
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 )
 
 // Store is the persistence contract used by the OpAMP server and admin API.

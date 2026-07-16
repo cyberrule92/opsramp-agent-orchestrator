@@ -18,7 +18,7 @@ import (
 	"github.com/open-telemetry/opamp-go/client"
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/protobufs"
-	"github.com/opsramp/opamp-orchestrator/internal/logger"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/logger"
 )
 
 func main() {

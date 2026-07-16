@@ -3,7 +3,7 @@ package opsramp
 import (
 	"encoding/json"
 
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 )
 
 // toModel maps an OpsRamp resource to the stored agent inventory record.

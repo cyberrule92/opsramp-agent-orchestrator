@@ -12,9 +12,9 @@ import (
 
 	opampserver "github.com/open-telemetry/opamp-go/server"
 	"github.com/open-telemetry/opamp-go/server/types"
-	"github.com/opsramp/opamp-orchestrator/internal/config"
-	"github.com/opsramp/opamp-orchestrator/internal/logger"
-	"github.com/opsramp/opamp-orchestrator/internal/store"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/config"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/logger"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/store"
 )
 
 // Manager owns the OpAMP server and the live connection registry.

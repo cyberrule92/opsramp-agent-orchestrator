@@ -5,8 +5,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/opsramp/opamp-orchestrator/internal/model"
-	"github.com/opsramp/opamp-orchestrator/internal/opsramp"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/opsramp"
 )
 
 // handleOpsRampGetConfig returns the current connector config with the secret

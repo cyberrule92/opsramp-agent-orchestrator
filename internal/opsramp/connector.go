@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 )
 
 // ConnectorStore is the persistence the Connector needs. *store.Postgres

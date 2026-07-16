@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/opsramp/opamp-orchestrator/internal/config"
-	"github.com/opsramp/opamp-orchestrator/internal/deploy"
-	"github.com/opsramp/opamp-orchestrator/internal/logger"
-	"github.com/opsramp/opamp-orchestrator/internal/opampserver"
-	"github.com/opsramp/opamp-orchestrator/internal/opsramp"
-	"github.com/opsramp/opamp-orchestrator/internal/reconcile"
-	"github.com/opsramp/opamp-orchestrator/internal/store"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/config"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/deploy"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/logger"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/opampserver"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/opsramp"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/reconcile"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/store"
 )
 
 // Server wires the admin API to the store and OpAMP manager.

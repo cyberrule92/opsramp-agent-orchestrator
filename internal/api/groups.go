@@ -3,8 +3,8 @@ package api
 import (
 	"net/http"
 
-	"github.com/opsramp/opamp-orchestrator/internal/model"
-	"github.com/opsramp/opamp-orchestrator/internal/opampserver"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/opampserver"
 )
 
 func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {

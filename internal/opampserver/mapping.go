@@ -2,7 +2,7 @@ package opampserver
 
 import (
 	"github.com/open-telemetry/opamp-go/protobufs"
-	"github.com/opsramp/opamp-orchestrator/internal/store"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/store"
 )
 
 // storeDescription assembles the persisted AgentDescription, extracting a few

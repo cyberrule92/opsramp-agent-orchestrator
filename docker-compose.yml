@@ -1,4 +1,4 @@
-name: opamp-orchestrator
+name: opsramp-agent-orchestrator
 
 services:
   postgres:

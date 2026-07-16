@@ -9,7 +9,7 @@ import (
 	"strconv"
 
 	"github.com/open-telemetry/opamp-go/protobufs"
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 

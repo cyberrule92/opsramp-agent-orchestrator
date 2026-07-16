@@ -8,7 +8,7 @@ import (
 	"sort"
 
 	"github.com/open-telemetry/opamp-go/protobufs"
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 )
 
 // ResolveGroup is the exported form of resolveGroup for use by the admin API.

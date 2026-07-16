@@ -1,4 +1,4 @@
-# OpAMP Orchestrator
+# OpsRamp Agent Orchestrator
 
 A production-grade **OpAMP** (Open Agent Management Protocol) management server for
 monitoring a fleet of agents. It accepts agent connections, persists their
@@ -34,7 +34,7 @@ server library and backed by Postgres.
 ## Quick start
 
 ```bash
-cd /opt/opamp-orchestrator
+cd opsramp-agent-orchestrator
 make up          # builds images, starts postgres + orchestrator + 1 demo agent
 make seed        # pushes an example config to the default group
 open http://localhost:8080
@@ -201,7 +201,7 @@ credentials, which are never stored).
 **1 — Bring up the stack.**
 
 ```bash
-cd /opt/opamp-orchestrator
+cd opsramp-agent-orchestrator
 make up                                  # postgres + orchestrator
 open http://localhost:4777               # dashboard (compose maps host 4777 → :8080)
 ```

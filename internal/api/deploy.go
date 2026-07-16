@@ -3,8 +3,8 @@ package api
 import (
 	"net/http"
 
-	"github.com/opsramp/opamp-orchestrator/internal/deploy"
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/deploy"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 )
 
 // handleDeployStart kicks off a bulk OpsRamp-agent installation over SSH. The

@@ -3,7 +3,7 @@ package opampserver
 import (
 	"testing"
 
-	"github.com/opsramp/opamp-orchestrator/internal/model"
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 )
 
 func TestConfigMapHashIsOrderIndependent(t *testing.T) {
