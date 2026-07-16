@@ -1,0 +1,6 @@
+bin/
+agent-state/
+.git/
+*.md
+docs/
+.env

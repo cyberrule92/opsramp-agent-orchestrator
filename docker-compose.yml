@@ -1,0 +1,78 @@
+name: opamp-orchestrator
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: opamp
+      POSTGRES_PASSWORD: opamp
+      POSTGRES_DB: opamp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opamp -d opamp"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: orchestrator
+    environment:
+      DATABASE_URL: postgres://opamp:opamp@postgres:5432/opamp?sslmode=disable
+      OPAMP_LISTEN_ENDPOINT: ":4320"
+      OPAMP_LISTEN_PATH: "/v1/opamp"
+      ADMIN_LISTEN_ENDPOINT: ":8080"
+      # Reachable by agents inside the compose network for package downloads.
+      PUBLIC_BASE_URL: "http://orchestrator:8080"
+      LOG_LEVEL: "info"
+      # Set these to require auth (leave empty for local dev):
+      # OPAMP_AUTH_TOKEN: "change-me"
+      # ADMIN_AUTH_TOKEN: "change-me"
+      # --- OpsRamp connector (optional): manage/monitor OpsRamp-managed agents ---
+      # Provide your tenant's API host + Integration OAuth key/secret to enable.
+      OPSRAMP_API_URL: "${OPSRAMP_API_URL:-}"
+      OPSRAMP_TENANT_ID: "${OPSRAMP_TENANT_ID:-}"
+      OPSRAMP_CLIENT_KEY: "${OPSRAMP_CLIENT_KEY:-}"
+      OPSRAMP_CLIENT_SECRET: "${OPSRAMP_CLIENT_SECRET:-}"
+      OPSRAMP_POLL_INTERVAL: "${OPSRAMP_POLL_INTERVAL:-60s}"
+      # Bulk agent deployment over SSH.
+      DEPLOY_STATE_DIR: "/home/nonroot"
+      DEPLOY_CONCURRENCY: "${DEPLOY_CONCURRENCY:-10}"
+    ports:
+      - "24320:4320" # OpAMP (agents) — host:container
+      - "4777:8080"  # Admin API + dashboard — host:container
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  demo-agent:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: demo-agent
+    environment:
+      OPAMP_SERVER_URL: "ws://orchestrator:4320/v1/opamp"
+      AGENT_SERVICE_NAME: "demo-monitoring-agent"
+      AGENT_SERVICE_VERSION: "1.0.0"
+      AGENT_LABELS: "env=prod,region=us-east-1"
+      AGENT_STATE_DIR: "/data"
+      LOG_LEVEL: "info"
+      # OPAMP_AUTH_TOKEN: "change-me"
+    # Run as root so the mounted state volume is writable.
+    user: "0:0"
+    volumes:
+      - agentdata:/data
+    depends_on:
+      - orchestrator
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  agentdata:

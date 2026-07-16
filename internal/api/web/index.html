@@ -1,0 +1,996 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpAMP Orchestrator</title>
+<style>
+  /* ============================================================= *
+   * Instrument-panel theme. A control plane for a fleet of agents:
+   * deep navy base, one indigo brand accent for interaction, and a
+   * separate green/amber/red family reserved for machine status.
+   * Machine values (hosts, hashes, versions, exit codes) are set in
+   * monospace throughout — the data is literal, so the type is too.
+   * ============================================================= */
+  :root {
+    --bg:        #0a0f1a;
+    --bg-grid:   #0c1220;
+    --panel:     #111a2b;
+    --panel-2:   #16223a;
+    --raised:    #1a2740;
+    --border:    #1f2c44;
+    --border-2:  #2b3c5c;
+    --fg:        #eaf0fb;
+    --muted:     #7d8fb0;
+    --faint:     #55688a;
+
+    --brand:     #6d7cff;   /* interaction only */
+    --brand-dim: #4a56c7;
+    --brand-glow: rgba(109,124,255,.16);
+
+    --ok:   #35d07f;
+    --warn: #e8b13a;
+    --err:  #ff6b6b;
+    --info: #6d7cff;
+
+    --ok-bg:   rgba(53,208,127,.13);
+    --warn-bg: rgba(232,177,58,.14);
+    --err-bg:  rgba(255,107,107,.13);
+    --info-bg: rgba(109,124,255,.14);
+    --muted-bg: rgba(125,143,176,.12);
+
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, system-ui, sans-serif;
+
+    --rail: 232px;
+    --radius: 10px;
+    --shadow: 0 1px 0 rgba(255,255,255,.02), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; color: var(--fg); font-family: var(--sans); font-size: 14px; line-height: 1.5;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(109,124,255,.06), transparent 60%),
+      linear-gradient(var(--bg-grid), var(--bg));
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--brand); text-decoration: none; }
+  ::selection { background: var(--brand-glow); }
+
+  /* ---- app shell -------------------------------------------------- */
+  .app { display: grid; grid-template-columns: var(--rail) 1fr; min-height: 100vh; }
+
+  .rail {
+    border-right: 1px solid var(--border); background: rgba(10,15,26,.7);
+    backdrop-filter: blur(8px); position: sticky; top: 0; height: 100vh;
+    display: flex; flex-direction: column; padding: 18px 14px; gap: 6px;
+  }
+  .brand { display: flex; align-items: center; gap: 11px; padding: 4px 8px 18px; }
+  .brand svg { flex: none; }
+  .brand .wm { display: flex; flex-direction: column; line-height: 1.15; }
+  .brand .wm b { font-size: 14px; font-weight: 650; letter-spacing: .01em; }
+  .brand .wm span { font-family: var(--mono); font-size: 10px; color: var(--faint); letter-spacing: .12em; text-transform: uppercase; }
+
+  .nav { display: flex; flex-direction: column; gap: 2px; }
+  .nav a {
+    display: flex; align-items: center; gap: 11px; padding: 9px 11px; border-radius: 8px;
+    color: var(--muted); font-size: 13.5px; font-weight: 500; cursor: pointer;
+    border: 1px solid transparent; transition: background .12s, color .12s, border-color .12s;
+  }
+  .nav a .ico { width: 17px; height: 17px; flex: none; opacity: .85; }
+  .nav a:hover { color: var(--fg); background: rgba(255,255,255,.03); }
+  .nav a.active {
+    color: var(--fg); background: var(--brand-glow); border-color: rgba(109,124,255,.32);
+  }
+  .nav a.active .ico { opacity: 1; color: var(--brand); }
+  .nav .count { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .nav a.active .count { color: var(--brand); }
+
+  .rail-foot { margin-top: auto; padding-top: 14px; border-top: 1px solid var(--border); }
+  .conn { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 8px; background: var(--panel); border: 1px solid var(--border); }
+  .conn .txt { min-width: 0; }
+  .conn .txt b { display: block; font-size: 12px; font-weight: 600; }
+  .conn .txt small { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---- status dot (also the "live" signature pulse) --------------- */
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; position: relative; background: var(--faint); }
+  .dot.ok   { background: var(--ok); }
+  .dot.warn { background: var(--warn); }
+  .dot.err  { background: var(--err); }
+  .dot.live::after {
+    content: ""; position: absolute; inset: -4px; border-radius: 50%;
+    border: 2px solid currentColor; color: inherit; opacity: .5; animation: ping 2s ease-out infinite;
+  }
+  .dot.ok.live::after { color: var(--ok); }
+  @keyframes ping { 0% { transform: scale(.7); opacity: .55; } 80%,100% { transform: scale(1.9); opacity: 0; } }
+
+  /* ---- top bar ---------------------------------------------------- */
+  .main { min-width: 0; display: flex; flex-direction: column; }
+  .topbar {
+    display: flex; align-items: center; gap: 14px; padding: 0 26px; height: 60px;
+    border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 20;
+    background: rgba(10,15,26,.82); backdrop-filter: blur(10px);
+  }
+  .topbar h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  .topbar .crumb { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .1em; text-transform: uppercase; }
+  .topbar .spacer { flex: 1; }
+  .refresh { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+  .refresh .dot { width: 7px; height: 7px; }
+  .tok { position: relative; }
+  .tok input {
+    background: var(--bg); border: 1px solid var(--border); color: var(--fg);
+    padding: 7px 11px 7px 30px; border-radius: 8px; width: 190px; font-family: var(--mono); font-size: 12px;
+  }
+  .tok::before { content: "\1F511"; position: absolute; left: 9px; top: 50%; transform: translateY(-50%); font-size: 12px; opacity: .6; }
+
+  /* ---- view container --------------------------------------------- */
+  .view { padding: 24px 26px 40px; display: none; animation: fade .18s ease; }
+  .view.active { display: block; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .view-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+  .view-head h2 { font-size: 19px; font-weight: 640; margin: 0; letter-spacing: -.01em; }
+  .view-head p { margin: 0; color: var(--muted); font-size: 13px; }
+
+  /* ---- stat readouts (signature) ---------------------------------- */
+  .readouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 22px; }
+  .readout { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 15px 17px; box-shadow: var(--shadow); position: relative; overflow: hidden; }
+  .readout::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent, var(--faint)); opacity: .8; }
+  .readout .l { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .readout .n { font-family: var(--mono); font-size: 30px; font-weight: 600; line-height: 1.05; margin-top: 8px; letter-spacing: -.02em; }
+  .readout .s { font-size: 11.5px; color: var(--faint); margin-top: 3px; }
+  .readout.ok   { --accent: var(--ok); }
+  .readout.warn { --accent: var(--warn); }
+  .readout.err  { --accent: var(--err); }
+  .readout.brand { --accent: var(--brand); }
+
+  /* ---- cards ------------------------------------------------------ */
+  .grid { display: grid; gap: 16px; }
+  .grid.two { grid-template-columns: 1.5fr 1fr; }
+  @media (max-width: 1100px) { .grid.two { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+  .card > header { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
+  .card > header h3 { font-size: 12px; margin: 0; font-family: var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--muted); font-weight: 600; }
+  .card > header .tools { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .card .scroll { max-height: 520px; overflow: auto; }
+  .card .pad { padding: 16px; }
+
+  /* ---- tables ----------------------------------------------------- */
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left; padding: 10px 16px; font-size: 11px; font-weight: 600; color: var(--faint);
+    text-transform: uppercase; letter-spacing: .06em; position: sticky; top: 0; z-index: 1;
+    background: var(--panel-2); border-bottom: 1px solid var(--border);
+  }
+  tbody td { padding: 11px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: rgba(255,255,255,.018); }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .sub { color: var(--faint); font-family: var(--mono); font-size: 11px; margin-top: 2px; }
+
+  /* ---- pills ------------------------------------------------------ */
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 600; font-family: var(--mono); border: 1px solid transparent; white-space: nowrap; }
+  .pill.ok    { background: var(--ok-bg);    color: var(--ok);    border-color: rgba(53,208,127,.28); }
+  .pill.err   { background: var(--err-bg);   color: var(--err);   border-color: rgba(255,107,107,.28); }
+  .pill.warn  { background: var(--warn-bg);  color: var(--warn);  border-color: rgba(232,177,58,.28); }
+  .pill.info  { background: var(--info-bg);  color: var(--info);  border-color: rgba(109,124,255,.28); }
+  .pill.muted { background: var(--muted-bg); color: var(--muted); }
+
+  /* ---- forms & controls ------------------------------------------- */
+  label.field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+  label.field .hint { color: var(--faint); font-weight: 400; font-size: 11px; }
+  input, select, textarea { font-family: inherit; color: var(--fg); }
+  input:not([type=checkbox]), select, textarea {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; font-size: 13px; width: 100%;
+    transition: border-color .12s, box-shadow .12s;
+  }
+  input.mono, textarea.mono { font-family: var(--mono); font-size: 12.5px; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--brand-dim); box-shadow: 0 0 0 3px var(--brand-glow); }
+  textarea { resize: vertical; }
+  select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: right 13px center, right 8px center; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 28px; }
+  .check { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+  .check input { width: auto; }
+
+  button, .btn {
+    display: inline-flex; align-items: center; gap: 7px; font-family: inherit; font-size: 13px; font-weight: 550;
+    background: var(--brand); border: 1px solid var(--brand); color: #fff; padding: 8px 15px; border-radius: 8px; cursor: pointer;
+    transition: filter .12s, background .12s, border-color .12s;
+  }
+  button:hover, .btn:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
+  button.ghost, .btn.ghost { background: transparent; border-color: var(--border-2); color: var(--fg); }
+  button.ghost:hover { background: rgba(255,255,255,.04); filter: none; }
+  button.danger { background: var(--err); border-color: var(--err); }
+  button.sm { padding: 5px 10px; font-size: 12px; }
+  :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+  .inline-sel { background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: 7px; padding: 5px 26px 5px 9px; font-size: 12px; width: auto; min-width: 120px; }
+  .note { font-size: 12px; color: var(--muted); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+  /* ---- empty / loading -------------------------------------------- */
+  .empty { padding: 40px 20px; text-align: center; color: var(--faint); font-size: 13px; }
+  .empty svg { opacity: .4; margin-bottom: 10px; }
+  .skel { height: 12px; border-radius: 6px; background: linear-gradient(90deg, var(--panel-2), var(--raised), var(--panel-2)); background-size: 200% 100%; animation: shimmer 1.3s infinite; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+
+  /* ---- deploy specifics ------------------------------------------- */
+  .form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px 16px; }
+  .form-grid .span2 { grid-column: 1 / -1; }
+  @media (max-width: 760px) { .form-grid { grid-template-columns: 1fr; } }
+  .resolve { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-radius: 8px; border: 1px dashed var(--border-2); background: var(--bg); font-size: 13px; }
+  .resolve.ok { border-color: rgba(53,208,127,.4); border-style: solid; }
+  .resolve.err { border-color: rgba(255,107,107,.4); border-style: solid; color: var(--err); }
+  .resolve b { font-family: var(--mono); font-size: 15px; }
+  .resolve .peek { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
+
+  .job { border-bottom: 1px solid var(--border); }
+  .job-head { display: grid; grid-template-columns: auto 1fr auto auto; gap: 12px; align-items: center; padding: 12px 16px; cursor: pointer; }
+  .job-head:hover { background: rgba(255,255,255,.02); }
+  .job-head .prog { height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; min-width: 120px; }
+  .job-head .prog i { display: block; height: 100%; background: var(--ok); transition: width .4s; }
+  .job-head .prog i.err { background: var(--err); }
+  .job-detail { padding: 0 16px 14px; }
+  .caret { transition: transform .15s; color: var(--faint); }
+  .job.open .caret { transform: rotate(90deg); }
+
+  /* ---- modal ------------------------------------------------------ */
+  .backdrop { position: fixed; inset: 0; background: rgba(4,7,13,.66); backdrop-filter: blur(3px); display: none; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
+  .backdrop.show { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border-2); border-radius: 14px; max-width: 460px; width: 100%; box-shadow: 0 24px 60px -20px rgba(0,0,0,.8); overflow: hidden; }
+  .modal header { padding: 18px 20px 12px; }
+  .modal header h3 { margin: 0; font-size: 16px; }
+  .modal .body { padding: 0 20px 8px; font-size: 13.5px; color: var(--muted); }
+  .modal .summary { margin: 14px 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .modal .summary div { display: flex; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .modal .summary div:last-child { border-bottom: none; }
+  .modal .summary span:first-child { color: var(--faint); }
+  .modal .summary span:last-child { font-family: var(--mono); color: var(--fg); }
+  .modal footer { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 20px 18px; }
+
+  /* ---- toast ------------------------------------------------------ */
+  .toast-wrap { position: fixed; bottom: 22px; right: 22px; display: flex; flex-direction: column; gap: 8px; z-index: 60; }
+  .toast { background: var(--panel-2); border: 1px solid var(--border-2); border-left: 3px solid var(--brand); padding: 11px 15px; border-radius: 9px; font-size: 13px; box-shadow: var(--shadow); animation: slidein .2s ease; max-width: 360px; }
+  .toast.ok  { border-left-color: var(--ok); }
+  .toast.err { border-left-color: var(--err); }
+  @keyframes slidein { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+
+  /* ---- responsive rail -------------------------------------------- */
+  @media (max-width: 820px) {
+    .app { grid-template-columns: 1fr; }
+    .rail { position: static; height: auto; flex-direction: row; align-items: center; flex-wrap: wrap; padding: 10px 14px; }
+    .rail .brand { padding: 4px 8px; }
+    .nav { flex-direction: row; flex-wrap: wrap; }
+    .nav a .count { display: none; }
+    .rail-foot { margin: 0 0 0 auto; padding: 0; border: none; }
+    .conn small { display: none; }
+    .tok input { width: 130px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ===================== LEFT RAIL ===================== -->
+  <aside class="rail">
+    <div class="brand">
+      <svg width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <circle cx="16" cy="16" r="14" stroke="#2b3c5c" stroke-width="1.5"/>
+        <circle cx="16" cy="16" r="9"  stroke="#3a4a6e" stroke-width="1.5"/>
+        <circle cx="16" cy="16" r="3.4" fill="#6d7cff"/>
+        <path d="M16 2 L16 6 M16 26 L16 30 M2 16 L6 16 M26 16 L30 16" stroke="#4a56c7" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <div class="wm"><b>OpAMP</b><span>Orchestrator</span></div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <a data-view="overview">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+        Overview
+      </a>
+      <a data-view="inventory">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/></svg>
+        Inventory <span class="count" id="c-inv"></span>
+      </a>
+      <a data-view="reconcile">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v4h-4"/></svg>
+        Reconcile <span class="count" id="c-rec"></span>
+      </a>
+      <a data-view="deploy">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2v14m0-14 4 4m-4-4-4 4"/><path d="M4 14v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></svg>
+        Deploy
+      </a>
+    </nav>
+
+    <div class="rail-foot">
+      <div class="conn" id="connCard" title="OpsRamp connector">
+        <span class="dot" id="connDot"></span>
+        <div class="txt"><b>OpsRamp</b><small id="connSub">checking…</small></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===================== MAIN ===================== -->
+  <div class="main">
+    <div class="topbar">
+      <h1 id="viewTitle">Overview</h1>
+      <span class="crumb" id="viewCrumb">/ fleet</span>
+      <span class="spacer"></span>
+      <span class="refresh"><span class="dot ok live" id="pulse"></span><span id="clock"></span></span>
+      <span class="tok"><input id="token" placeholder="admin token" aria-label="Admin token" /></span>
+    </div>
+
+    <!-- ---------- OVERVIEW ---------- -->
+    <section class="view" id="v-overview">
+      <div class="view-head"><h2>Overview</h2><p>OpsRamp agent inventory and recent SSH deployments at a glance.</p></div>
+      <div class="readouts" id="ovStats"></div>
+      <div class="grid two">
+        <div class="card">
+          <header><h3>Inventory</h3><div class="tools"><a data-nav="inventory" class="note">View all →</a></div></header>
+          <div class="scroll" style="max-height:440px"><table><thead><tr><th>Name</th><th>Host</th><th>IP</th><th>Status</th></tr></thead><tbody id="ovInv"></tbody></table></div>
+        </div>
+        <div class="card">
+          <header><h3>Recent deployments</h3><div class="tools"><a data-nav="deploy" class="note">View all →</a></div></header>
+          <div class="scroll" id="ovDeploys" style="max-height:440px"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- INVENTORY ---------- -->
+    <section class="view" id="v-inventory">
+      <div class="view-head"><h2>OpsRamp Inventory</h2><p>Agents discovered from the OpsRamp Resources API. Managed over REST, synced on an interval.</p></div>
+
+      <div class="card" style="margin-bottom:16px">
+        <header>
+          <h3>Connector</h3>
+          <div class="tools">
+            <span class="note" id="invStatus"></span>
+            <button class="ghost sm" id="opsrampSync">Sync now</button>
+            <button class="ghost sm" id="toggleCfg">Settings</button>
+          </div>
+        </header>
+        <div class="pad" id="connSettings" style="display:none">
+          <div class="form-grid">
+            <label class="field span2">API URL <span class="hint">OpsRamp pod host</span><input id="cfgUrl" class="mono" placeholder="https://pod.api.opsramp.com" /></label>
+            <label class="field">Tenant ID<input id="cfgTenant" class="mono" placeholder="client_xxxx / uuid" /></label>
+            <label class="field">Client Key<input id="cfgKey" class="mono" placeholder="integration key" /></label>
+            <label class="field">Client Secret <span class="hint">blank keeps current</span><input id="cfgSecret" class="mono" type="password" placeholder="integration secret" /></label>
+            <label class="field">Poll interval <span class="hint">seconds, min 30</span><input id="cfgPoll" class="mono" type="number" min="30" value="60" /></label>
+          </div>
+          <div class="row" style="margin-top:14px; justify-content:space-between">
+            <label class="check"><input type="checkbox" id="cfgEnabled" checked /> Connector enabled</label>
+            <div class="row"><span class="note" id="cfgSaveStatus"></span><button id="cfgSave">Save &amp; connect</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <header>
+          <h3>Discovered agents</h3>
+          <div class="tools">
+            <span class="note" id="invSelInfo"></span>
+            <div class="row" id="invBulk" style="display:none; gap:6px">
+              <button class="ghost sm" data-bulk="preflight">Preflight</button>
+              <button class="ghost sm" data-bulk="repair">Repair</button>
+              <button class="ghost sm" data-bulk="upgrade">Upgrade</button>
+              <button class="ghost sm" data-bulk="uninstall">Uninstall</button>
+            </div>
+            <span class="note" id="invMeta"></span>
+          </div>
+        </header>
+        <div class="scroll"><table><thead><tr>
+          <th style="width:34px"><input type="checkbox" id="invAll" aria-label="Select all" /></th>
+          <th>Name</th><th>Host</th><th>IP</th><th>OS</th><th>Version</th><th>Status</th><th>Synced</th>
+        </tr></thead><tbody id="invTbody"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- ---------- RECONCILE ---------- -->
+    <section class="view" id="v-reconcile">
+      <div class="view-head"><h2>Reconcile</h2><p>Continuous drift detection. Recommendations are proposed here; applying one opens a targeted deployment where you supply credentials.</p></div>
+      <div class="readouts" id="recStats"></div>
+      <div class="grid two">
+        <div class="card">
+          <header><h3>Recommendations</h3><div class="tools"><button class="ghost sm" id="recRefresh">Re-evaluate</button></div></header>
+          <div class="pad" id="recRecs"></div>
+        </div>
+        <div class="card">
+          <header><h3>Version distribution</h3><div class="tools"><span class="note" id="recLatest"></span></div></header>
+          <div class="pad" id="recVersions"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- DEPLOY ---------- -->
+    <section class="view" id="v-deploy">
+      <div class="view-head"><h2>Fleet Operations</h2><p id="dLead">Run agent operations across a set of VMs over SSH. Credentials stay in memory for the run and are never stored.</p></div>
+      <div class="grid two">
+        <div class="card">
+          <header><h3 id="dCardTitle">New operation</h3>
+            <div class="tools"><select class="inline-sel" id="dAction" aria-label="Operation">
+              <option value="install">Install agent</option>
+              <option value="preflight">Preflight check</option>
+              <option value="uninstall">Uninstall / decommission</option>
+            </select></div>
+          </header>
+          <div class="pad">
+            <div id="dBanner" style="display:none; margin-bottom:14px"></div>
+            <label class="field" style="margin-bottom:14px">Target hosts <span class="hint">IPs, CIDR (10.0.0.0/28), or ranges (10.0.0.1-20) — comma / newline separated</span>
+              <textarea id="dTargets" class="mono" style="height:80px" placeholder="10.0.0.10-10.0.0.20&#10;192.168.1.0/28&#10;web-01.internal"></textarea></label>
+            <div class="resolve" id="dResolve" style="margin-bottom:16px"><span class="dot"></span><span>Enter targets to resolve host count.</span></div>
+
+            <div class="form-grid">
+              <label class="field">SSH user<input id="dUser" placeholder="root" /></label>
+              <label class="field">Port<input id="dPort" type="number" value="22" /></label>
+              <label class="field span2">Authentication
+                <select id="dAuth"><option value="password">Password</option><option value="key">Private key (PEM)</option></select></label>
+              <label class="field" id="dPassWrap">SSH password<input id="dPass" type="password" /></label>
+              <label class="field" id="dKeyPassWrap" style="display:none">Key passphrase <span class="hint">optional</span><input id="dKeyPass" type="password" /></label>
+              <label class="field span2" id="dKeyWrap" style="display:none">Private key<textarea id="dKey" class="mono" style="height:96px" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
+              <label class="field" id="dAgentKeyWrap">Agent access key (-K) <span class="hint">integration's agent key</span><input id="dAgentKey" class="mono" placeholder="from the Installed Integration" /></label>
+              <label class="field" id="dAgentSecretWrap">Agent security key (-S)<input id="dAgentSecret" class="mono" type="password" placeholder="from the Installed Integration" /></label>
+              <label class="field span2" id="dIntgWrap">Integration ID <span class="hint">passed as -F, e.g. INTG-…</span><input id="dIntg" class="mono" placeholder="INTG-..." /></label>
+            </div>
+
+            <!-- install-only options -->
+            <div class="row" id="dInstallOpts" style="margin:16px 0 4px">
+              <label class="check"><input type="checkbox" id="dSudo" checked /> Run with sudo</label>
+              <label class="check"><input type="checkbox" id="dLog" checked /> Enable log management</label>
+            </div>
+
+            <!-- uninstall-only options -->
+            <div id="dUninstallOpts" style="display:none; margin-top:14px">
+              <label class="check" style="margin-bottom:10px"><input type="checkbox" id="dDeregister" /> Also deregister the resource from OpsRamp <span class="hint">&nbsp;(destructive)</span></label>
+              <label class="field">Custom uninstall command <span class="hint">optional — overrides auto-detection</span><input id="dUninstallCmd" class="mono" placeholder="/opt/opsramp/agent/bin/uninstall.sh -f" /></label>
+            </div>
+
+            <!-- advanced: jump host -->
+            <details class="cfg" style="margin-top:16px; border:1px solid var(--border); border-radius:8px; padding:0 14px">
+              <summary style="padding:11px 0">Jump host (bastion) — optional</summary>
+              <div class="form-grid" style="padding-bottom:14px">
+                <label class="field">Bastion host<input id="bHost" class="mono" placeholder="bastion.example.com" /></label>
+                <label class="field">Bastion port<input id="bPort" type="number" value="22" /></label>
+                <label class="field">Bastion user <span class="hint">defaults to SSH user</span><input id="bUser" placeholder="ec2-user" /></label>
+                <label class="field">Bastion password<input id="bPass" type="password" /></label>
+                <label class="field span2">Bastion private key <span class="hint">optional; used instead of password</span><textarea id="bKey" class="mono" style="height:70px" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
+              </div>
+            </details>
+
+            <div class="row" style="margin-top:16px; justify-content:space-between">
+              <button id="dDeploy">Review &amp; install</button>
+              <span class="note" id="dStatus"></span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <header><h3>Job history</h3><div class="tools"><button class="ghost sm" id="refreshJobs">Refresh</button></div></header>
+          <div class="scroll" id="deployJobs" style="max-height:720px"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- confirmation modal -->
+<div class="backdrop" id="backdrop">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mTitle">
+    <header><h3 id="mTitle">Confirm deployment</h3></header>
+    <div class="body">
+      <span id="mBody">This installs the OpsRamp agent on every resolved host over SSH.</span>
+      <div class="summary" id="mSummary"></div>
+    </div>
+    <footer>
+      <button class="ghost" id="mCancel">Cancel</button>
+      <button id="mConfirm">Install now</button>
+    </footer>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toasts"></div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+const timeAgo = (t) => {
+  if (!t) return "—";
+  const d = (Date.now() - new Date(t).getTime()) / 1000;
+  if (d < 60) return Math.max(0,Math.floor(d)) + "s ago";
+  if (d < 3600) return Math.floor(d/60) + "m ago";
+  if (d < 86400) return Math.floor(d/3600) + "h ago";
+  return Math.floor(d/86400) + "d ago";
+};
+
+// ---- auth token ----
+const token = () => $("#token").value.trim();
+$("#token").value = localStorage.getItem("adminToken") || "";
+$("#token").addEventListener("change", () => localStorage.setItem("adminToken", token()));
+function headers(json) {
+  const h = {};
+  if (json) h["Content-Type"] = "application/json";
+  if (token()) h["Authorization"] = "Bearer " + token();
+  return h;
+}
+async function api(path, opts) {
+  const res = await fetch(path, opts || {});
+  const txt = await res.text();
+  let data; try { data = txt ? JSON.parse(txt) : {}; } catch { data = { raw: txt }; }
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+function toast(msg, kind) {
+  const el = document.createElement("div");
+  el.className = "toast " + (kind || "");
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity .3s"; setTimeout(() => el.remove(), 300); }, 3200);
+}
+
+// ---- pills ----
+function jobPill(s) {
+  const c = (s === "succeeded" || s === "success") ? "ok" : s === "failed" ? "err" : s === "partial" ? "warn" : s === "running" ? "info" : "muted";
+  return `<span class="pill ${c}">${esc(s)}</span>`;
+}
+
+// ================= ROUTER =================
+const VIEWS = {
+  overview:  { title: "Overview", crumb: "/ overview" },
+  inventory: { title: "OpsRamp Inventory", crumb: "/ inventory" },
+  reconcile: { title: "Reconcile", crumb: "/ reconcile" },
+  deploy:    { title: "Fleet Operations", crumb: "/ deploy" },
+};
+let current = "overview";
+function go(view) {
+  if (!VIEWS[view]) view = "overview";
+  current = view;
+  $$(".view").forEach(v => v.classList.toggle("active", v.id === "v-" + view));
+  $$("#nav a").forEach(a => a.classList.toggle("active", a.dataset.view === view));
+  $("#viewTitle").textContent = VIEWS[view].title;
+  $("#viewCrumb").textContent = VIEWS[view].crumb;
+  if (location.hash !== "#" + view) location.hash = view;
+  tick(); // refresh data for the newly shown view immediately
+}
+$("#nav").addEventListener("click", (e) => { const a = e.target.closest("a[data-view]"); if (a) { e.preventDefault(); go(a.dataset.view); } });
+document.addEventListener("click", (e) => { const a = e.target.closest("[data-nav]"); if (a) { e.preventDefault(); go(a.dataset.nav); } });
+window.addEventListener("hashchange", () => go(location.hash.slice(1)));
+
+function emptyRow(cols, msg) { return `<tr><td colspan="${cols}"><div class="empty">${esc(msg)}</div></td></tr>`; }
+
+// ================= OVERVIEW =================
+// Rendered from the inventory + deploy data already fetched for their own views.
+let lastInvAgents = [], lastInvConfigured = false, lastJobs = [];
+function renderOverview() {
+  const agents = lastInvAgents;
+  const active = agents.filter(a => /(active|up|online)/.test((a.agent_status || "").toLowerCase())).length;
+  const hostsInstalled = lastJobs.reduce((n, j) => n + (j.succeeded || 0), 0);
+  $("#ovStats").innerHTML = [
+    ["brand", "Inventory", agents.length, "agents discovered"],
+    ["ok", "Active", active, `${agents.length ? Math.round(active/agents.length*100) : 0}% reporting`],
+    ["brand", "Deployments", lastJobs.length, "runs recorded"],
+    ["ok", "Hosts installed", hostsInstalled, "successful installs"],
+  ].map(([k,l,n,s]) => `<div class="readout ${k}"><div class="l">${l}</div><div class="n">${n}</div><div class="s">${s}</div></div>`).join("");
+
+  $("#ovInv").innerHTML = agents.slice(0, 8).map(a => {
+    const s = (a.agent_status || "").toLowerCase();
+    const c = /(active|up|online)/.test(s) ? "ok" : /(down|inactive|offline)/.test(s) ? "err" : "muted";
+    return `<tr><td>${esc(a.name)||"—"}</td><td class="mono">${esc(a.host_name)||"—"}</td>
+      <td class="mono">${esc(a.ip_address)||"—"}</td>
+      <td><span class="pill ${c}">${esc(a.agent_status)||"unknown"}</span></td></tr>`;
+  }).join("") || emptyRow(4, lastInvConfigured ? 'No agents in inventory yet — sync from Inventory.' : "Configure the OpsRamp connector in Inventory to begin.");
+
+  $("#ovDeploys").innerHTML = lastJobs.slice(0, 8).map(j => {
+    const done = j.succeeded + j.failed, pct = j.total ? Math.round(done / j.total * 100) : 0;
+    return `<div style="padding:11px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
+      ${jobPill(j.status)}<span class="mono note">${esc(j.id)}</span>
+      <span class="note" style="margin-left:auto">✓${j.succeeded} ✗${j.failed} / ${j.total}</span>
+      <div class="prog" style="width:90px"><i class="${j.failed && !j.succeeded ? "err" : ""}" style="width:${pct}%"></i></div></div>`;
+  }).join("") || `<div class="empty">No deployments yet. Start one from Deploy.</div>`;
+}
+
+// ================= INVENTORY / CONNECTOR =================
+async function loadInventory() {
+  let st;
+  try { st = await api("/api/v1/opsramp/status"); } catch (e) { setConn("err", "unreachable"); return; }
+  if (!st.configured) {
+    setConn("", "not configured");
+    $("#invStatus").textContent = "Connector disabled — add credentials in Settings.";
+    $("#invTbody").innerHTML = emptyRow(8, "Configure the OpsRamp connector to begin syncing inventory.");
+    $("#c-inv").textContent = ""; $("#invMeta").textContent = "";
+    lastInvAgents = []; lastInvConfigured = false;
+    return;
+  }
+  lastInvConfigured = true;
+  setConn(st.authenticated ? "ok" : "err", `tenant ${st.tenant_id || "?"} · ${st.authenticated ? "authenticated" : "auth failed"}`);
+  $("#invStatus").textContent = st.authenticated ? "" : ("Auth error: " + (st.auth_error || "check credentials"));
+  try {
+    const ag = await api("/api/v1/opsramp/agents");
+    const agents = ag.agents || [];
+    lastInvAgents = agents;
+    $("#c-inv").textContent = agents.length || "";
+    $("#invMeta").textContent = `${ag.count} in inventory`;
+    $("#invTbody").innerHTML = agents.map(a => {
+      const s = (a.agent_status || "").toLowerCase();
+      const c = /(active|up|online|running)/.test(s) ? "ok" : /(down|inactive|offline|disconnect)/.test(s) ? "err" : "muted";
+      const os = (a.raw && (a.raw.osName || a.raw.deviceType)) || a.resource_type || "—";
+      const selectable = !!a.ip_address;
+      return `<tr>
+        <td>${selectable ? `<input type="checkbox" class="invSel" data-ip="${esc(a.ip_address)}" ${invSelected.has(a.ip_address)?"checked":""} />` : ""}</td>
+        <td>${esc(a.name)||"—"}</td>
+        <td class="mono">${esc(a.host_name)||"—"}</td>
+        <td class="mono">${esc(a.ip_address)||"—"}</td>
+        <td>${esc(os)}</td>
+        <td class="mono">${esc(a.agent_version)||"—"}</td>
+        <td><span class="pill ${c}">${esc(a.agent_status)||"unknown"}</span></td>
+        <td class="note mono">${timeAgo(a.last_synced)}</td></tr>`;
+    }).join("") || emptyRow(8, st.authenticated ? 'No agents in inventory yet — click "Sync now".' : "Fix authentication to sync inventory.");
+    wireInventorySelection();
+  } catch (e) { $("#invStatus").textContent = e.message; }
+}
+
+// ---- inventory row selection + bulk actions ----
+const invSelected = new Set();
+function wireInventorySelection() {
+  $$(".invSel").forEach(cb => cb.addEventListener("change", () => {
+    if (cb.checked) invSelected.add(cb.dataset.ip); else invSelected.delete(cb.dataset.ip);
+    updateInvBulk();
+  }));
+  const all = $("#invAll");
+  if (all) all.onchange = () => {
+    $$(".invSel").forEach(cb => { cb.checked = all.checked; if (all.checked) invSelected.add(cb.dataset.ip); else invSelected.delete(cb.dataset.ip); });
+    updateInvBulk();
+  };
+  updateInvBulk();
+}
+function updateInvBulk() {
+  const n = invSelected.size;
+  $("#invBulk").style.display = n ? "flex" : "none";
+  $("#invSelInfo").textContent = n ? `${n} selected` : "";
+}
+$$("[data-bulk]").forEach(b => b.addEventListener("click", () => {
+  const targets = [...invSelected].join(", ");
+  if (!targets) return;
+  prefillDeploy(b.dataset.bulk, targets, `${invSelected.size} host(s) selected from inventory`);
+}));
+function setConn(kind, sub) {
+  const dot = $("#connDot");
+  dot.className = "dot " + (kind || "") + (kind === "ok" ? " live" : "");
+  $("#connSub").textContent = sub;
+}
+async function loadConnConfig() {
+  try {
+    const c = await api("/api/v1/opsramp/config");
+    $("#cfgUrl").value = c.base_url || "";
+    $("#cfgTenant").value = c.tenant_id || "";
+    $("#cfgKey").value = c.client_key || "";
+    $("#cfgPoll").value = c.poll_interval_seconds || 60;
+    $("#cfgEnabled").checked = c.enabled !== false;
+    $("#cfgSecret").placeholder = c.secret_set ? "•••••••• (unchanged)" : "integration secret";
+  } catch {}
+}
+$("#toggleCfg").addEventListener("click", () => {
+  const el = $("#connSettings");
+  const show = el.style.display === "none";
+  el.style.display = show ? "block" : "none";
+  if (show) loadConnConfig();
+});
+$("#cfgSave").addEventListener("click", async () => {
+  const payload = {
+    base_url: $("#cfgUrl").value.trim(), tenant_id: $("#cfgTenant").value.trim(),
+    client_key: $("#cfgKey").value.trim(), client_secret: $("#cfgSecret").value,
+    poll_interval_seconds: parseInt($("#cfgPoll").value, 10) || 60, enabled: $("#cfgEnabled").checked,
+  };
+  $("#cfgSaveStatus").textContent = "validating…";
+  try {
+    await api("/api/v1/opsramp/config", { method: "PUT", headers: headers(true), body: JSON.stringify(payload) });
+    $("#cfgSecret").value = ""; $("#cfgSaveStatus").textContent = "saved";
+    toast("OpsRamp connection saved", "ok"); loadConnConfig(); loadInventory();
+  } catch (e) { $("#cfgSaveStatus").textContent = "error"; toast("Save failed: " + e.message, "err"); }
+});
+$("#opsrampSync").addEventListener("click", async () => {
+  $("#invStatus").textContent = "syncing…";
+  try { const r = await api("/api/v1/opsramp/sync", { method: "POST", headers: headers(false) });
+    toast(`Synced ${r.synced} agent(s)`, "ok"); loadInventory();
+  } catch (e) { toast("Sync failed: " + e.message, "err"); $("#invStatus").textContent = e.message; }
+});
+
+// ================= DEPLOY =================
+// Client-side mirror of the server's target expansion, used only to preview the
+// resolved host count and catch obvious mistakes before firing SSH at a fleet.
+const MAX_TARGETS = 1024;
+function ipToInt(s) { const p = s.split("."); if (p.length !== 4) return null; let n = 0; for (const o of p) { if (!/^\d+$/.test(o)) return null; const v = +o; if (v > 255) return null; n = n * 256 + v; } return n >>> 0; }
+function intToIp(n) { return [(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255].join("."); }
+function expandTargets(spec) {
+  const toks = spec.split(/[\s,;]+/).filter(Boolean);
+  const seen = new Set(); let count = 0; const sample = []; const bad = [];
+  const add = (h) => { if (!seen.has(h)) { seen.add(h); count++; if (sample.length < 6) sample.push(h); } };
+  for (const t of toks) {
+    try {
+      if (t.includes("/")) {
+        const [base, bitsS] = t.split("/"); const b = +bitsS; const bi = ipToInt(base);
+        if (bi === null || !/^\d+$/.test(bitsS) || b < 0 || b > 32) throw 0;
+        const size = Math.pow(2, 32 - b); const net = bi - (bi % size);
+        const dropEnds = b <= 30; const lo = net + (dropEnds ? 1 : 0); const hi = net + size - 1 - (dropEnds ? 1 : 0);
+        for (let n = lo; n <= hi; n++) { add(intToIp(n)); if (count > MAX_TARGETS) throw "over"; }
+      } else if (t.includes("-") && /^\d+\.\d+\.\d+\.\d+-/.test(t)) {
+        const [loS, hiS] = t.split("-"); const lo = ipToInt(loS.trim()); let hi;
+        if (hiS.includes(".")) hi = ipToInt(hiS.trim());
+        else { const b = loS.trim().split("."); b[3] = hiS.trim(); hi = ipToInt(b.join(".")); }
+        if (lo === null || hi === null || hi < lo) throw 0;
+        for (let n = lo; n <= hi; n++) { add(intToIp(n)); if (count > MAX_TARGETS) throw "over"; }
+      } else { add(t); }
+    } catch (e) { if (e === "over") return { over: true, count }; bad.push(t); }
+  }
+  return { count, sample, bad };
+}
+function updateResolve() {
+  const spec = $("#dTargets").value.trim();
+  const box = $("#dResolve");
+  if (!spec) { box.className = "resolve"; box.innerHTML = `<span class="dot"></span><span>Enter targets to resolve host count.</span>`; return null; }
+  const r = expandTargets(spec);
+  if (r.over) { box.className = "resolve err"; box.innerHTML = `<span class="dot err"></span><span>Exceeds ${MAX_TARGETS}-host limit — narrow the range.</span>`; return null; }
+  if (r.bad && r.bad.length && r.count === 0) { box.className = "resolve err"; box.innerHTML = `<span class="dot err"></span><span>Couldn't parse: ${esc(r.bad.slice(0,3).join(", "))}</span>`; return null; }
+  box.className = "resolve ok";
+  const badNote = r.bad && r.bad.length ? ` <span class="note">(+${r.bad.length} unparsed)</span>` : "";
+  box.innerHTML = `<span class="dot ok"></span><span>Resolves to <b>${r.count}</b> host${r.count===1?"":"s"}${badNote}</span><span class="peek">${esc(r.sample.join(", "))}${r.count>r.sample.length?" …":""}</span>`;
+  return r;
+}
+$("#dTargets").addEventListener("input", updateResolve);
+$("#dAuth").addEventListener("change", () => {
+  const key = $("#dAuth").value === "key";
+  $("#dPassWrap").style.display = key ? "none" : "flex";
+  $("#dKeyWrap").style.display = key ? "flex" : "none";
+  $("#dKeyPassWrap").style.display = key ? "flex" : "none";
+});
+
+// ---- action: install (default) | preflight | repair | upgrade | uninstall ----
+// The <select> offers install/preflight/uninstall; repair/upgrade arrive via
+// prefill from Inventory/Reconcile and behave like install (installer re-run).
+let actionOverride = null;
+const ACTION_LABEL = { install: "Install", preflight: "Run preflight", repair: "Repair", upgrade: "Upgrade", uninstall: "Uninstall" };
+const getAction = () => { const a = actionOverride || $("#dAction").value; return ACTION_LABEL[a] ? a : "install"; };
+const isInstallish = (a) => a === "install" || a === "repair" || a === "upgrade";
+function applyActionUI() {
+  const a = getAction();
+  const installish = isInstallish(a);
+  $("#dInstallOpts").style.display = installish ? "flex" : "none";
+  $("#dIntgWrap").style.display = installish ? "flex" : "none";
+  $("#dAgentKeyWrap").style.display = installish ? "flex" : "none";
+  $("#dAgentSecretWrap").style.display = installish ? "flex" : "none";
+  $("#dUninstallOpts").style.display = a === "uninstall" ? "block" : "none";
+  $("#dCardTitle").textContent = a === "preflight" ? "Preflight check" : (installish ? "Install / remediate" : "Uninstall / decommission");
+  $("#dDeploy").textContent = a === "preflight" ? "Run preflight" : ("Review & " + ACTION_LABEL[a].toLowerCase());
+  const leads = {
+    preflight: "Read-only readiness probe over SSH — checks OS, sudo, existing agent, disk, and OpsRamp reachability. Changes nothing.",
+    uninstall: "Remove the OpsRamp agent over SSH, optionally deregistering the resource from OpsRamp.",
+    repair: "Re-run the installer to restore agents reporting down.",
+    upgrade: "Re-run the installer to bring agents up to the newest fleet version.",
+    install: "Install the OpsRamp agent across a set of VMs over SSH. Credentials stay in memory and are never stored.",
+  };
+  $("#dLead").textContent = leads[a] || leads.install;
+}
+$("#dAction").addEventListener("change", () => { actionOverride = null; applyActionUI(); });
+
+// prefillDeploy targets the Deploy view with a computed host set + action.
+function prefillDeploy(action, targets, note) {
+  actionOverride = isInstallish(action) || action === "preflight" || action === "uninstall" ? action : "install";
+  // Reflect a user-selectable action in the dropdown; keep override for repair/upgrade.
+  if (["install", "preflight", "uninstall"].includes(action)) { $("#dAction").value = action; actionOverride = null; }
+  $("#dTargets").value = targets;
+  const b = $("#dBanner");
+  b.style.display = "block";
+  b.className = "resolve ok";
+  b.innerHTML = `<span class="dot ok"></span><span>${esc(ACTION_LABEL[action])} — ${esc(note)}</span>`;
+  applyActionUI();
+  updateResolve();
+  go("deploy");
+  $("#dUser").focus();
+}
+
+function currentDeployPayload() {
+  const useKey = $("#dAuth").value === "key";
+  return {
+    action: getAction(),
+    targets: $("#dTargets").value,
+    ssh_user: $("#dUser").value.trim(),
+    ssh_password: useKey ? "" : $("#dPass").value,
+    ssh_private_key: useKey ? $("#dKey").value : "",
+    ssh_key_passphrase: useKey ? $("#dKeyPass").value : "",
+    port: parseInt($("#dPort").value, 10) || 22,
+    use_sudo: $("#dSudo").checked,
+    integration_id: $("#dIntg").value.trim(),
+    enable_log_mgmt: $("#dLog").checked,
+    agent_key: $("#dAgentKey").value.trim(),
+    agent_secret: $("#dAgentSecret").value,
+    bastion_host: $("#bHost").value.trim(),
+    bastion_user: $("#bUser").value.trim(),
+    bastion_password: $("#bPass").value,
+    bastion_private_key: $("#bKey").value,
+    bastion_port: parseInt($("#bPort").value, 10) || 22,
+    uninstall_command: $("#dUninstallCmd").value.trim(),
+    deregister: $("#dDeregister").checked,
+  };
+}
+$("#dDeploy").addEventListener("click", () => {
+  const r = updateResolve();
+  if (!r || !r.count) { toast("Add valid target hosts first", "err"); return; }
+  const p = currentDeployPayload();
+  if (!p.ssh_user) { toast("SSH user is required", "err"); return; }
+  const hasAuth = $("#dAuth").value === "key" ? !!p.ssh_private_key.trim() : !!p.ssh_password;
+  if (!hasAuth) { toast("Provide an SSH password or private key", "err"); return; }
+  const a = getAction();
+  // Preflight is read-only — run without a confirmation gate.
+  if (a === "preflight") { submitDeploy(); return; }
+  const rows = [
+    ["Action", ACTION_LABEL[a]], ["Hosts", r.count], ["SSH", `${esc(p.ssh_user)} : ${p.port}`],
+    ["Auth", $("#dAuth").value === "key" ? "private key" : "password"],
+  ];
+  if (p.bastion_host) rows.push(["Via bastion", esc(p.bastion_host)]);
+  if (isInstallish(a)) rows.push(["Sudo", p.use_sudo ? "yes" : "no"], ["Log mgmt", p.enable_log_mgmt ? "on" : "off"]);
+  if (a === "uninstall") rows.push(["Deregister", p.deregister ? "yes (removes from OpsRamp)" : "no"]);
+  $("#mSummary").innerHTML = rows.map(([k,v]) => `<div><span>${k}</span><span>${v}</span></div>`).join("");
+  $("#mTitle").textContent = "Confirm " + ACTION_LABEL[a].toLowerCase();
+  $("#mConfirm").textContent = ACTION_LABEL[a] + " now";
+  $("#mConfirm").className = a === "uninstall" ? "danger" : "";
+  const bodies = {
+    uninstall: "This removes the OpsRamp agent from every resolved host over SSH" + (p.deregister ? " and deletes the resource from OpsRamp. This cannot be undone." : ". This cannot be undone per-host."),
+    repair: "This re-runs the OpsRamp installer on every resolved host to restore the agent.",
+    upgrade: "This re-runs the OpsRamp installer on every resolved host to upgrade the agent.",
+    install: "This installs the OpsRamp agent on every resolved host over SSH. It runs a privileged installer.",
+  };
+  $("#mBody").textContent = bodies[a] || bodies.install;
+  openModal();
+});
+function openModal() { $("#backdrop").classList.add("show"); $("#mConfirm").focus(); }
+function closeModal() { $("#backdrop").classList.remove("show"); }
+$("#mCancel").addEventListener("click", closeModal);
+$("#backdrop").addEventListener("click", (e) => { if (e.target === $("#backdrop")) closeModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+$("#mConfirm").addEventListener("click", () => { closeModal(); submitDeploy(); });
+async function submitDeploy() {
+  const a = getAction();
+  $("#dStatus").textContent = "starting…";
+  try {
+    const job = await api("/api/v1/deploy", { method: "POST", headers: headers(true), body: JSON.stringify(currentDeployPayload()) });
+    $("#dStatus").textContent = `${job.action} job ${job.id} · ${job.total} host(s)`;
+    toast(`${ACTION_LABEL[a]} started on ${job.total} host(s)`, "ok");
+    expandedJob = job.id; loadDeploy();
+  } catch (e) { $("#dStatus").textContent = "error"; toast(ACTION_LABEL[a] + " failed: " + e.message, "err"); }
+}
+
+let expandedJob = null;
+async function loadDeploy() {
+  let d;
+  try { d = await api("/api/v1/deploy/jobs"); } catch { return; }
+  const jobs = d.jobs || [];
+  lastJobs = jobs;
+  if (!jobs.length) { $("#deployJobs").innerHTML = `<div class="empty">No deployments yet. Configure a run to install agents across your fleet.</div>`; return; }
+  $("#deployJobs").innerHTML = jobs.map(j => {
+    const done = j.succeeded + j.failed, pct = j.total ? Math.round(done / j.total * 100) : 0;
+    const open = expandedJob === j.id;
+    return `<div class="job ${open?"open":""}" data-job="${j.id}">
+      <div class="job-head" data-toggle="${j.id}">
+        <svg class="caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 6l6 6-6 6"/></svg>
+        <div>${jobPill(j.status)} <span class="pill muted">${esc(j.action || "install")}</span> <span class="mono note">${esc(j.id)}</span>
+          <div class="sub">${esc(j.ssh_user)}@ · ${j.total} host(s)</div></div>
+        <div><div class="prog"><i class="${j.failed && !j.succeeded ? "err" : ""}" style="width:${pct}%"></i></div>
+          <div class="sub" style="text-align:right">✓${j.succeeded} ✗${j.failed} / ${j.total}</div></div>
+        <div class="note mono" style="font-size:11px">${timeAgo(j.created_at)}</div>
+      </div>
+      <div class="job-detail" id="jd-${j.id}"></div></div>`;
+  }).join("");
+  $$("[data-toggle]").forEach(el => el.addEventListener("click", () => {
+    const id = el.dataset.toggle;
+    expandedJob = expandedJob === id ? null : id;
+    loadDeploy();
+  }));
+  if (expandedJob) renderJobDetail(expandedJob);
+}
+// preflight checks parsed from KEY=VALUE probe output into pass/warn/fail pills.
+function preflightPills(output, err) {
+  const kv = {};
+  (output || "").split(/\r?\n/).forEach(l => { const i = l.indexOf("="); if (i > 0) kv[l.slice(0, i).trim()] = l.slice(i + 1).trim(); });
+  const pill = (c, t) => `<span class="pill ${c}">${esc(t)}</span>`;
+  const out = [];
+  if (kv.SSH === "fail" || err) return pill("err", "unreachable") + (err ? ` <span class="note">${esc(err.slice(0,120))}</span>` : "");
+  out.push(pill("ok", "reachable"));
+  if (kv.SUDO) out.push(pill(kv.SUDO === "nopasswd" ? "ok" : kv.SUDO === "absent" ? "err" : "warn", "sudo:" + kv.SUDO));
+  if (kv.AGENT) out.push(pill(kv.AGENT === "present" ? "warn" : "muted", "agent:" + kv.AGENT));
+  if (kv.API && kv.API !== "skip") out.push(pill(kv.API === "ok" ? "ok" : "err", "opsramp:" + kv.API));
+  if (kv.DISK_ROOT_MB) out.push(pill(+kv.DISK_ROOT_MB < 500 ? "warn" : "muted", (Math.round(+kv.DISK_ROOT_MB/1024*10)/10) + "G free"));
+  if (kv.OS) out.push(`<span class="note mono">${esc(kv.OS)} · ${esc(kv.ARCH||"")}</span>`);
+  return out.join(" ");
+}
+async function renderJobDetail(id) {
+  const box = document.getElementById("jd-" + id);
+  if (!box) return;
+  try {
+    const j = await api("/api/v1/deploy/jobs/" + id);
+    const preflight = j.action === "preflight";
+    box.innerHTML = `<table style="margin-top:6px"><thead><tr><th>Host</th><th>Status</th>${preflight ? "<th>Checks</th>" : "<th>Exit</th><th>Duration</th><th>Detail</th>"}</tr></thead><tbody>` +
+      (j.hosts || []).map(h => preflight ? `<tr>
+        <td class="mono">${esc(h.host)}</td>
+        <td>${jobPill(h.status)}</td>
+        <td style="line-height:2">${preflightPills(h.output, h.error)}</td>
+      </tr>` : `<tr>
+        <td class="mono">${esc(h.host)}</td>
+        <td>${jobPill(h.status)}</td>
+        <td class="mono">${h.exit_code}</td>
+        <td class="note mono">${h.duration_ms ? (h.duration_ms/1000).toFixed(1)+"s" : "—"}</td>
+        <td class="mono note" style="max-width:420px;white-space:pre-wrap;word-break:break-word">${esc((h.error || h.output || "").slice(0, 600))}</td>
+      </tr>`).join("") + `</tbody></table>`;
+  } catch (e) { box.innerHTML = `<div class="note">${esc(e.message)}</div>`; }
+}
+$("#refreshJobs").addEventListener("click", loadDeploy);
+
+// ================= RECONCILE =================
+let lastRec = null;
+async function loadReconcile() {
+  let rep;
+  try { rep = await api("/api/v1/reconcile"); } catch { return; }
+  lastRec = rep;
+  const recCount = (rep.down || 0) + (rep.outdated || 0);
+  $("#c-rec").textContent = recCount || "";
+  if (current !== "reconcile") return;
+
+  $("#recStats").innerHTML = [
+    ["brand", "Agents", rep.total || 0, "in inventory"],
+    ["ok", "Active", rep.active || 0, "reporting up"],
+    [rep.down ? "err" : "", "Down", rep.down || 0, rep.down ? "need repair" : "none"],
+    [rep.outdated ? "warn" : "", "Outdated", rep.outdated || 0, rep.outdated ? "behind latest" : "on latest"],
+  ].map(([k,l,n,s]) => `<div class="readout ${k}"><div class="l">${l}</div><div class="n">${n}</div><div class="s">${s}</div></div>`).join("");
+
+  $("#recLatest").textContent = rep.latest_version ? "latest " + rep.latest_version : "";
+  const recs = rep.recommendations || [];
+  $("#recRecs").innerHTML = recs.length ? recs.map(r => `
+    <div class="resolve ${r.kind === "repair" ? "err" : "ok"}" style="display:block; margin-bottom:12px">
+      <div class="row" style="justify-content:space-between">
+        <b style="font-size:13px">${esc(r.kind === "repair" ? "Repair down agents" : "Upgrade outdated agents")} · ${r.hosts.length}</b>
+        <button class="sm" data-rec="${esc(r.action)}">Apply →</button>
+      </div>
+      <div class="note" style="margin:6px 0">${esc(r.reason)}</div>
+      <div class="peek" style="max-width:100%">${esc(r.hosts.slice(0,8).map(h => h.ip_address).join(", "))}${r.hosts.length>8?" …":""}</div>
+    </div>`).join("") : `<div class="empty">No drift detected — every agent is up and on the latest fleet version.</div>`;
+  $$("[data-rec]").forEach(b => b.addEventListener("click", () => {
+    const rec = recs.find(x => x.action === b.dataset.rec);
+    if (rec) prefillDeploy(rec.action, rec.target_spec.split(",").join(", "), `${rec.hosts.length} host(s) from reconcile`);
+  }));
+
+  const vers = rep.versions || [];
+  const max = vers.reduce((m, v) => Math.max(m, v.count), 1);
+  $("#recVersions").innerHTML = vers.length ? vers.map(v => `
+    <div style="margin-bottom:10px">
+      <div class="row" style="justify-content:space-between; font-size:12px"><span class="mono">${esc(v.version)}</span><span class="note">${v.count}</span></div>
+      <div class="prog" style="height:8px; margin-top:4px"><i class="${v.version === rep.latest_version ? "" : "err"}" style="width:${Math.round(v.count/max*100)}%; background:${v.version === rep.latest_version ? "var(--ok)" : "var(--warn)"}"></i></div>
+    </div>`).join("") : `<div class="empty">No version data yet.</div>`;
+}
+$("#recRefresh").addEventListener("click", loadReconcile);
+
+// ================= POLLING =================
+let busy = false;
+async function tick() {
+  const pulse = $("#pulse"); pulse.classList.add("live");
+  if (busy) return; busy = true;
+  try {
+    // Inventory + deploy + reconcile drive the rail badges and every view.
+    await Promise.all([
+      loadInventory().catch(()=>{}),
+      loadDeploy().catch(()=>{}),
+      loadReconcile().catch(()=>{}),
+    ]);
+    if (current === "overview") renderOverview();
+  } finally { busy = false; }
+}
+setInterval(() => $("#clock").textContent = new Date().toLocaleTimeString(), 1000);
+setInterval(tick, 5000);
+
+// boot
+applyActionUI();
+go(location.hash.slice(1) || "overview");
+loadConnConfig();
+tick();
+</script>
+</body>
+</html>

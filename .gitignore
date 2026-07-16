@@ -1,0 +1,11 @@
+/bin/
+/agent-state/
+*.log
+.env
+
+# Built binaries (produced by `make` / `go build`)
+/orchestrator
+/demo-agent
+
+# Claude Code local settings
+.claude/settings.local.json
