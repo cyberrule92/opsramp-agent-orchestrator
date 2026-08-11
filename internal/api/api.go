@@ -75,6 +75,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/opsramp/config", s.handleOpsRampGetConfig)
 	mux.HandleFunc("PUT /api/v1/opsramp/config", s.handleOpsRampSetConfig)
 	mux.HandleFunc("GET /api/v1/opsramp/status", s.handleOpsRampStatus)
+	mux.HandleFunc("POST /api/v1/opsramp/test", s.handleOpsRampTest)
+	mux.HandleFunc("POST /api/v1/opsramp/token", s.handleOpsRampToken)
 	mux.HandleFunc("GET /api/v1/opsramp/agents", s.handleOpsRampAgents)
 	mux.HandleFunc("POST /api/v1/opsramp/sync", s.handleOpsRampSync)
 	mux.HandleFunc("GET /api/v1/opsramp/agents/{platform}/info", s.handleOpsRampAgentInfo)

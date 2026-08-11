@@ -137,8 +137,21 @@ authenticates, **polls the agent inventory** (so OpsRamp agents show up in the
 dashboard), and proxies the [`/v2/api/agents`](https://develop.opsramp.com/v2/api/agents)
 management surface.
 
-Enable it by providing credentials from an OpsRamp Integration (OAuth2 client
-credentials):
+**Set it up from the dashboard** — no credentials need to live in the backend
+config. Open **Inventory → Connector → Settings** and enter the API URL, tenant
+id, and the client key/secret from an OpsRamp Integration:
+
+- **Test connection** authenticates and probes the tenant *without saving*, and
+  reports the two failure modes separately — bad key/secret, versus valid
+  credentials paired with a tenant id the token cannot reach.
+- **Get token** / **Force refresh** show the live Bearer token (hidden by
+  default, with copy and a ready-made `curl` line) and when it expires, so an
+  operator can reproduce any API call by hand.
+- **Save & connect** validates, persists to the `opsramp_config` table, and
+  hot-swaps the live client and poller — no restart.
+
+The env vars below are optional: they only *seed* the initial config on first
+boot when the database has none, and the stored settings win from then on.
 
 ```bash
 OPSRAMP_API_URL=https://pod7.api.opsramp.com   # your pod's API host
@@ -165,6 +178,10 @@ re-authenticates and retries once. `GET /api/v1/opsramp/status` reports
 Connector endpoints (all under the admin API):
 
 ```
+GET  /api/v1/opsramp/config                          current settings (secret masked)
+PUT  /api/v1/opsramp/config                          save settings and reconnect
+POST /api/v1/opsramp/test                            validate credentials without saving them
+POST /api/v1/opsramp/token                           current Bearer token ({"refresh":true} forces a new one)
 GET  /api/v1/opsramp/status                         configured? authenticated? inventory count
 GET  /api/v1/opsramp/agents                          synced agent inventory (from Resources Search)
 POST /api/v1/opsramp/sync                            sync inventory now
@@ -174,6 +191,10 @@ POST /api/v1/opsramp/updates                          proxy: configure agent aut
 POST /api/v1/opsramp/policies/{policyId}/devices      proxy: assign resources to an agent policy
 POST /api/v1/opsramp/profiles/{profileId}/devices     proxy: assign resources to a master profile
 ```
+
+`/test` and `/token` hand back a live Bearer token, and both are `POST` so that
+`ADMIN_AUTH_TOKEN` gates them. Set that token on any deployment whose admin port
+is reachable by anyone you would not hand tenant credentials to.
 
 Inventory comes from the Resources Search API (`agentInstalled:true`), mapped to
 `agentVersion` / `agentStatus` / host / IP and stored in `opsramp_agents`. The

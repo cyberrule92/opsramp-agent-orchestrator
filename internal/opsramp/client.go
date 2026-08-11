@@ -166,6 +166,19 @@ func (c *Client) RefreshToken(ctx context.Context) error {
 	return err
 }
 
+// Token returns a valid bearer token and its expiry, acquiring or refreshing it
+// as needed; refresh forces a new one even when the cached token is still good.
+// It hands out the credential itself so an operator can inspect or replay a
+// call by hand — prefer EnsureToken when only validity matters.
+func (c *Client) Token(ctx context.Context, refresh bool) (string, time.Time, error) {
+	tok, err := c.accessToken(ctx, refresh)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	expiry, _ := c.TokenExpiry()
+	return tok, expiry, nil
+}
+
 // TokenExpiry reports when the cached token expires, and whether one is cached.
 func (c *Client) TokenExpiry() (time.Time, bool) {
 	c.mu.Lock()

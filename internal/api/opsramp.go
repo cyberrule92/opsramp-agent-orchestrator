@@ -79,6 +79,74 @@ func (s *Server) handleOpsRampStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// connSettingsBody is the connector config shape accepted by the set/test
+// endpoints. Empty fields fall back to what is already stored.
+type connSettingsBody struct {
+	BaseURL             string `json:"base_url"`
+	TenantID            string `json:"tenant_id"`
+	ClientKey           string `json:"client_key"`
+	ClientSecret        string `json:"client_secret"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds"`
+}
+
+// handleOpsRampTest authenticates a set of connector settings and probes their
+// tenant without saving anything, so an operator can validate credentials from
+// the UI before committing them. With an empty body it tests the saved
+// connection. A failed check is reported as ok:false with 200 — the request
+// itself succeeded, and the UI renders the reason inline.
+func (s *Server) handleOpsRampTest(w http.ResponseWriter, r *http.Request) {
+	var body connSettingsBody
+	if err := readJSON(r, &body); err != nil && err != io.EOF {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	check, err := s.opsramp.CheckSettings(r.Context(), model.OpsRampSettings{
+		BaseURL:      trimURL(body.BaseURL),
+		TenantID:     body.TenantID,
+		ClientKey:    body.ClientKey,
+		ClientSecret: body.ClientSecret,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "authenticated": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            check.TenantOK,
+		"authenticated": true,
+		"tenant_ok":     check.TenantOK,
+		"tenant_error":  check.TenantError,
+		"token_type":    "Bearer",
+		"access_token":  check.Token,
+		"expires_at":    check.ExpiresAt.UTC().Format(time.RFC3339),
+		"expires_in":    int(time.Until(check.ExpiresAt).Seconds()),
+	})
+}
+
+// handleOpsRampToken returns the connector's current bearer token, acquiring or
+// refreshing it when it has expired ("refresh": true forces a new one). It
+// hands out the credential on purpose — operators reproduce API calls with it —
+// so it is a POST, which the admin token gates when one is configured.
+func (s *Server) handleOpsRampToken(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Refresh bool `json:"refresh"`
+	}
+	if err := readJSON(r, &body); err != nil && err != io.EOF {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	token, expiry, err := s.opsramp.Token(r.Context(), body.Refresh)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token_type":   "Bearer",
+		"access_token": token,
+		"expires_at":   expiry.UTC().Format(time.RFC3339),
+		"expires_in":   int(time.Until(expiry).Seconds()),
+	})
+}
+
 // handleOpsRampAgents lists the synced OpsRamp agent inventory from the store.
 func (s *Server) handleOpsRampAgents(w http.ResponseWriter, r *http.Request) {
 	agents, err := s.store.ListOpsRampAgents(r.Context())

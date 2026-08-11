@@ -253,6 +253,68 @@ func (c *Connector) EnsureToken(ctx context.Context) error {
 	return nil
 }
 
+// Token returns the active client's bearer token and its expiry, acquiring or
+// refreshing it as needed. refresh forces a new token even when the cached one
+// is still valid.
+func (c *Connector) Token(ctx context.Context, refresh bool) (string, time.Time, error) {
+	client, ok := c.CurrentClient()
+	if !ok {
+		return "", time.Time{}, fmt.Errorf("opsramp connector is not enabled")
+	}
+	return client.Token(ctx, refresh)
+}
+
+// ConnectionCheck is the outcome of validating a set of connector settings.
+// Authentication and tenant access are reported separately: a client key and
+// secret can be perfectly valid while the tenant id they are paired with is
+// not, and that distinction is what an operator needs to fix the config.
+type ConnectionCheck struct {
+	Token       string
+	ExpiresAt   time.Time
+	TenantOK    bool
+	TenantError string
+}
+
+// CheckSettings authenticates with in and probes its tenant path, without
+// saving anything or disturbing the live client — this is what the UI's "Test
+// connection" runs before committing a config. Fields left empty fall back to
+// the currently stored settings, so testing the saved connection needs no
+// input at all (in particular a blank ClientSecret keeps the stored secret).
+// A non-nil error means authentication itself failed.
+func (c *Connector) CheckSettings(ctx context.Context, in model.OpsRampSettings) (*ConnectionCheck, error) {
+	c.mu.RLock()
+	cur := c.settings
+	c.mu.RUnlock()
+
+	if in.BaseURL == "" {
+		in.BaseURL = cur.BaseURL
+	}
+	if in.TenantID == "" {
+		in.TenantID = cur.TenantID
+	}
+	if in.ClientKey == "" {
+		in.ClientKey = cur.ClientKey
+	}
+	if in.ClientSecret == "" {
+		in.ClientSecret = cur.ClientSecret
+	}
+	if !in.Complete() {
+		return nil, fmt.Errorf("API URL, tenant id, client key and secret are all required")
+	}
+
+	probe := New(Config{BaseURL: in.BaseURL, TenantID: in.TenantID, ClientKey: in.ClientKey, ClientSecret: in.ClientSecret})
+	token, expiry, err := probe.Token(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	out := &ConnectionCheck{Token: token, ExpiresAt: expiry, TenantOK: true}
+	if _, err := probe.SearchResources(ctx, "", 1, 1); err != nil {
+		out.TenantOK = false
+		out.TenantError = err.Error()
+	}
+	return out, nil
+}
+
 // TokenExpiry reports when the active client's cached token expires. ok is
 // false when the connector is disabled or no token is cached.
 func (c *Connector) TokenExpiry() (time.Time, bool) {
