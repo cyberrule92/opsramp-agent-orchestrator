@@ -1,6 +1,13 @@
 package deploy
 
 import (
+	"context"
+	"errors"
+	"log/slog"
+	"sync"
+
+	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
+
 	"strings"
 	"testing"
 )
@@ -48,6 +55,8 @@ func TestBuildInstallCommand(t *testing.T) {
 	})
 	for _, want := range []string{
 		"sudo sh /tmp/opsramp-deployAgent.sh",
+		// Without -i silent the installer blocks on an interactive prompt.
+		"-i silent",
 		"-K 'K'", "-S 'S'", "-s 'host.api.opsramp.com'", "-F 'INTG-1'", "-L true",
 	} {
 		if !strings.Contains(cmd, want) {
@@ -107,5 +116,57 @@ func TestBuildProbeCommandReachability(t *testing.T) {
 	without := buildProbeCommand("")
 	if !strings.Contains(without, "API=skip") {
 		t.Errorf("probe without apiHost should skip reachability: %q", without)
+	}
+}
+
+// stubStore records host results and can be made to reject ones carrying
+// captured output, the way Postgres rejects text it cannot store.
+type stubStore struct {
+	mu           sync.Mutex
+	results      []model.DeployHostResult
+	rejectOutput bool
+}
+
+func (s *stubStore) CreateDeployJob(context.Context, model.DeployJob, []string) error { return nil }
+
+func (s *stubStore) SetDeployJobStatus(context.Context, string, string, int, int, bool) error {
+	return nil
+}
+
+func (s *stubStore) UpsertDeployHostResult(_ context.Context, r model.DeployHostResult) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rejectOutput && r.Output != "" {
+		return errors.New(`invalid byte sequence for encoding "UTF8"`)
+	}
+	s.results = append(s.results, r)
+	return nil
+}
+
+func (s *stubStore) last() model.DeployHostResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.results[len(s.results)-1]
+}
+
+// A host result the store rejects must not leave the host looking like it is
+// still running: the verdict is re-recorded without the captured output.
+func TestRunRecordsOutcomeWhenStoreRejectsOutput(t *testing.T) {
+	store := &stubStore{rejectOutput: true}
+	m := &Manager{store: store, log: slog.New(slog.DiscardHandler), concurrency: 1}
+
+	m.run("job-1", []string{"10.0.0.1"}, func(context.Context, string) HostOutcome {
+		return HostOutcome{Host: "10.0.0.1", Output: "binary\x00output", Err: "installer exited with code 1"}
+	})
+
+	got := store.last()
+	if got.Status != "failed" {
+		t.Errorf("status = %q, want failed", got.Status)
+	}
+	if got.Output != "" {
+		t.Errorf("fallback should drop the output, got %q", got.Output)
+	}
+	if !strings.Contains(got.Error, "installer exited with code 1") {
+		t.Errorf("original error lost: %q", got.Error)
 	}
 }

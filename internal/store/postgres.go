@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -609,8 +610,22 @@ func (p *Postgres) UpsertDeployHostResult(ctx context.Context, r model.DeployHos
 		VALUES ($1,$2,$3,$4,$5,$6,$7, now())
 		ON CONFLICT (job_id, host) DO UPDATE SET
 			status=$3, exit_code=$4, output=$5, error=$6, duration_ms=$7, updated_at=now()`,
-		r.JobID, r.Host, r.Status, r.ExitCode, r.Output, r.Error, r.DurationMs)
+		r.JobID, r.Host, r.Status, r.ExitCode, pgText(r.Output), pgText(r.Error), r.DurationMs)
 	return err
+}
+
+// pgText makes arbitrary bytes safe for a Postgres text column. Postgres
+// rejects NUL characters outright and rejects invalid UTF-8 for a UTF8
+// database, and both turn up in captured SSH output: remote commands emit
+// binary, and truncating output at a byte limit can split a multi-byte rune.
+// Without this a host's result is silently rejected and the job looks like it
+// is still running long after it failed.
+func pgText(s string) string {
+	if s == "" {
+		return s
+	}
+	s = strings.ReplaceAll(s, "\x00", "")
+	return strings.ToValidUTF8(s, "�")
 }
 
 func scanDeployJob(row pgx.Row) (*model.DeployJob, error) {

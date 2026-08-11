@@ -210,8 +210,10 @@ func (m *Manager) run(jobID string, hosts []string, perHost func(context.Context
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			_ = m.store.UpsertDeployHostResult(ctx, model.DeployHostResult{
-				JobID: jobID, Host: host, Status: "running"})
+			if err := m.store.UpsertDeployHostResult(ctx, model.DeployHostResult{
+				JobID: jobID, Host: host, Status: "running"}); err != nil {
+				m.log.Warn("record host start", "id", jobID, "host", host, "err", err)
+			}
 
 			outcome := perHost(ctx, host)
 
@@ -219,10 +221,21 @@ func (m *Manager) run(jobID string, hosts []string, perHost func(context.Context
 			if outcome.OK {
 				status = "success"
 			}
-			_ = m.store.UpsertDeployHostResult(ctx, model.DeployHostResult{
+			result := model.DeployHostResult{
 				JobID: jobID, Host: host, Status: status, ExitCode: outcome.ExitCode,
 				Output: outcome.Output, Error: outcome.Err, DurationMs: outcome.Duration.Milliseconds(),
-			})
+			}
+			if err := m.store.UpsertDeployHostResult(ctx, result); err != nil {
+				m.log.Warn("record host result", "id", jobID, "host", host, "status", status, "err", err)
+				// The outcome itself must not be lost: retry without the
+				// captured output so the operator at least sees the verdict
+				// and why the full result could not be stored.
+				result.Output = ""
+				result.Error = "result could not be stored (" + err.Error() + "); original error: " + outcome.Err
+				if err := m.store.UpsertDeployHostResult(ctx, result); err != nil {
+					m.log.Error("record host result (fallback)", "id", jobID, "host", host, "err", err)
+				}
+			}
 
 			mu.Lock()
 			if outcome.OK {

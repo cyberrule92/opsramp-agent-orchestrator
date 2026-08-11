@@ -116,7 +116,12 @@ func (r *Runner) InstallOnHost(ctx context.Context, host string, creds Credentia
 
 // BuildInstallCommand renders the OpsRamp deployAgent.sh invocation:
 //
-//	sh /tmp/opsramp-deployAgent.sh -K <key> -S <secret> -s <apiHost> -F <intg> -L true
+//	sh /tmp/opsramp-deployAgent.sh -i silent -K <key> -S <secret> -s <apiHost> -F <intg> -L true
+//
+// `-i silent` is required: deployAgent.sh defaults to installType=interactive,
+// where it prints a banner and blocks on `read` for a y/n confirmation. Over an
+// SSH exec channel that read hits EOF immediately and the script exits 1 having
+// done nothing, which looks like an instant unexplained install failure.
 func BuildInstallCommand(useSudo bool, p InstallParams) string {
 	var b strings.Builder
 	if useSudo {
@@ -124,6 +129,7 @@ func BuildInstallCommand(useSudo bool, p InstallParams) string {
 	}
 	b.WriteString("sh ")
 	b.WriteString(remoteScriptPath)
+	b.WriteString(" -i silent")
 	b.WriteString(" -K ")
 	b.WriteString(shellQuote(p.Key))
 	b.WriteString(" -S ")
