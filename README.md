@@ -153,6 +153,15 @@ Auth flow: `POST {API_URL}/tenancy/auth/oauth/token` with
 `global:manage`, ~2h TTL, cached & auto-refreshed). API calls go to
 `{API_URL}/api/v2/tenants/{tenantId}/...`.
 
+**Token handling.** OpsRamp hands out a tenant-wide token and reports its
+*remaining* life in `expires_in`, so the cached token is refreshed a minute
+before it expires and is never trusted for longer than its 2h maximum
+regardless of what the endpoint reports. Every agent operation — a deploy job,
+an inventory sync, an admin proxy call — checks the token first and renews it if
+expired, and any call the API rejects with `401`/`407 InvalidTokenException`
+re-authenticates and retries once. `GET /api/v1/opsramp/status` reports
+`token_expires_at` for the cached token.
+
 Connector endpoints (all under the admin API):
 
 ```

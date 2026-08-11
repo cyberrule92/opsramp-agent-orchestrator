@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/opsramp/opsramp-agent-orchestrator/internal/model"
 	"github.com/opsramp/opsramp-agent-orchestrator/internal/opsramp"
@@ -68,6 +69,9 @@ func (s *Server) handleOpsRampStatus(w http.ResponseWriter, r *http.Request) {
 		} else {
 			resp["authenticated"] = true
 		}
+		if exp, ok := s.opsramp.TokenExpiry(); ok {
+			resp["token_expires_at"] = exp.UTC().Format(time.RFC3339)
+		}
 	}
 	if n, err := s.store.CountOpsRampAgents(r.Context()); err == nil {
 		resp["inventory_count"] = n
@@ -97,11 +101,16 @@ func (s *Server) handleOpsRampSync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"synced": n})
 }
 
-// requireClient returns the active client or writes a 503.
-func (s *Server) requireClient(w http.ResponseWriter) (*opsramp.Client, bool) {
+// requireClient returns the active client, with its access token checked and
+// refreshed if expired, or writes a 503.
+func (s *Server) requireClient(w http.ResponseWriter, r *http.Request) (*opsramp.Client, bool) {
 	c, ok := s.opsramp.CurrentClient()
 	if !ok {
 		writeErr(w, http.StatusServiceUnavailable, "OpsRamp connector is not enabled; configure it first")
+		return nil, false
+	}
+	if err := c.EnsureToken(r.Context()); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "OpsRamp authentication failed: "+err.Error())
 		return nil, false
 	}
 	return c, true
@@ -109,7 +118,7 @@ func (s *Server) requireClient(w http.ResponseWriter) (*opsramp.Client, bool) {
 
 // handleOpsRampAgentInfo proxies GET /agents/{platform}/info.
 func (s *Server) handleOpsRampAgentInfo(w http.ResponseWriter, r *http.Request) {
-	c, ok := s.requireClient(w)
+	c, ok := s.requireClient(w, r)
 	if !ok {
 		return
 	}
@@ -123,7 +132,7 @@ func (s *Server) handleOpsRampAgentInfo(w http.ResponseWriter, r *http.Request) 
 
 // handleOpsRampUpdates proxies POST /agents/updates.
 func (s *Server) handleOpsRampUpdates(w http.ResponseWriter, r *http.Request) {
-	c, ok := s.requireClient(w)
+	c, ok := s.requireClient(w, r)
 	if !ok {
 		return
 	}
@@ -138,7 +147,7 @@ func (s *Server) handleOpsRampUpdates(w http.ResponseWriter, r *http.Request) {
 
 // handleOpsRampAssignPolicy proxies POST /agentPolicies/{policyId}/devices.
 func (s *Server) handleOpsRampAssignPolicy(w http.ResponseWriter, r *http.Request) {
-	c, ok := s.requireClient(w)
+	c, ok := s.requireClient(w, r)
 	if !ok {
 		return
 	}
@@ -153,7 +162,7 @@ func (s *Server) handleOpsRampAssignPolicy(w http.ResponseWriter, r *http.Reques
 
 // handleOpsRampAssignProfile proxies POST /agentProfiles/{profileId}/devices.
 func (s *Server) handleOpsRampAssignProfile(w http.ResponseWriter, r *http.Request) {
-	c, ok := s.requireClient(w)
+	c, ok := s.requireClient(w, r)
 	if !ok {
 		return
 	}
@@ -168,7 +177,7 @@ func (s *Server) handleOpsRampAssignProfile(w http.ResponseWriter, r *http.Reque
 
 // handleOpsRampDownload proxies an agent package download stream.
 func (s *Server) handleOpsRampDownload(w http.ResponseWriter, r *http.Request) {
-	c, ok := s.requireClient(w)
+	c, ok := s.requireClient(w, r)
 	if !ok {
 		return
 	}

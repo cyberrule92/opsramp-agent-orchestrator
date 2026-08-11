@@ -38,7 +38,24 @@ func (c Config) Enabled() bool {
 	return c.BaseURL != "" && c.TenantID != "" && c.ClientKey != "" && c.ClientSecret != ""
 }
 
+// Token lifetime handling.
+const (
+	// tokenSkew refreshes a token slightly before it expires so an in-flight
+	// request never carries a token that dies on the wire.
+	tokenSkew = time.Minute
+	// maxTokenTTL caps how long a token is trusted regardless of the expires_in
+	// the token endpoint reports. OpsRamp hands out a tenant-wide token and
+	// reports its *remaining* life, so an implausibly large value would
+	// otherwise pin an already-dead token in the cache indefinitely.
+	maxTokenTTL = 2 * time.Hour
+	// minTokenTTL is used when the endpoint reports a non-positive expires_in:
+	// re-check soon rather than trusting a token that claims to be expired.
+	minTokenTTL = 5 * time.Minute
+)
+
 // Client is a thread-safe OpsRamp API client with transparent token caching.
+// The cached token is refreshed before it expires, and re-fetched on demand
+// when the API rejects it (see do).
 type Client struct {
 	cfg  Config
 	http *http.Client
@@ -70,13 +87,28 @@ type tokenResponse struct {
 }
 
 // accessToken returns a valid bearer token, fetching/refreshing as needed.
-func (c *Client) accessToken(ctx context.Context) (string, error) {
+// When force is true the cached token is discarded and a new one is fetched.
+func (c *Client) accessToken(ctx context.Context, force bool) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Refresh a minute before expiry to avoid races on the boundary.
-	if c.token != "" && time.Now().Before(c.tokenExpiry.Add(-time.Minute)) {
+	if !force && c.tokenValidLocked() {
 		return c.token, nil
 	}
+	return c.fetchTokenLocked(ctx)
+}
+
+// tokenValidLocked reports whether a cached token exists and is not about to
+// expire. Caller holds mu.
+func (c *Client) tokenValidLocked() bool {
+	return c.token != "" && time.Now().Before(c.tokenExpiry.Add(-tokenSkew))
+}
+
+// fetchTokenLocked requests a new token and caches it. On failure the cached
+// token is cleared so a later call re-authenticates rather than reusing a token
+// that is likely dead. Caller holds mu.
+func (c *Client) fetchTokenLocked(ctx context.Context) (string, error) {
+	c.token = ""
+	c.tokenExpiry = time.Time{}
 
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
@@ -108,18 +140,45 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("oauth token: empty access_token")
 	}
 	c.token = tr.AccessToken
-	ttl := tr.ExpiresIn
-	if ttl <= 0 {
-		ttl = 3600
+	ttl := time.Duration(tr.ExpiresIn) * time.Second
+	switch {
+	case ttl <= 0:
+		ttl = minTokenTTL
+	case ttl > maxTokenTTL:
+		ttl = maxTokenTTL
 	}
-	c.tokenExpiry = time.Now().Add(time.Duration(ttl) * time.Second)
+	c.tokenExpiry = time.Now().Add(ttl)
 	return c.token, nil
+}
+
+// EnsureToken checks the cached access token and refreshes it when it is
+// missing or expired. Call it before starting an operation that would be
+// disruptive to fail partway through on an auth error; ordinary API calls
+// refresh on their own.
+func (c *Client) EnsureToken(ctx context.Context) error {
+	_, err := c.accessToken(ctx, false)
+	return err
+}
+
+// RefreshToken discards the cached token and acquires a new one.
+func (c *Client) RefreshToken(ctx context.Context) error {
+	_, err := c.accessToken(ctx, true)
+	return err
+}
+
+// TokenExpiry reports when the cached token expires, and whether one is cached.
+func (c *Client) TokenExpiry() (time.Time, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.token == "" {
+		return time.Time{}, false
+	}
+	return c.tokenExpiry, true
 }
 
 // Ping verifies connectivity and credentials by acquiring a token.
 func (c *Client) Ping(ctx context.Context) error {
-	_, err := c.accessToken(ctx)
-	return err
+	return c.EnsureToken(ctx)
 }
 
 // APIError carries a non-2xx OpsRamp API response.
@@ -138,18 +197,44 @@ func (c *Client) tenantPath(suffix string) string {
 	return fmt.Sprintf("/api/v2/tenants/%s/%s", c.cfg.TenantID, strings.TrimLeft(suffix, "/"))
 }
 
+// isAuthStatus reports whether a response status means the access token was
+// rejected. OpsRamp answers an invalid or expired token with 407 and an
+// InvalidTokenException body rather than the usual 401.
+func isAuthStatus(code int) bool {
+	return code == http.StatusUnauthorized || code == http.StatusProxyAuthRequired
+}
+
 // do performs an authenticated request, returning the raw response for the
 // caller to handle (JSON or binary). The caller must close resp.Body.
-func (c *Client) do(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType, accept string) (*http.Response, error) {
-	tok, err := c.accessToken(ctx)
+//
+// A token can stop working before the expiry the token endpoint advertised —
+// it may be revoked, or the tenant-wide token rotated — so a rejected token is
+// re-fetched and the request retried once. body is kept as bytes so the retry
+// can replay it.
+func (c *Client) do(ctx context.Context, method, path string, query url.Values, body []byte, contentType, accept string) (*http.Response, error) {
+	resp, err := c.doOnce(ctx, method, path, query, body, contentType, accept, false)
+	if err != nil || !isAuthStatus(resp.StatusCode) {
+		return resp, err
+	}
+	resp.Body.Close()
+	return c.doOnce(ctx, method, path, query, body, contentType, accept, true)
+}
+
+// doOnce issues a single attempt; refresh forces a new token first.
+func (c *Client) doOnce(ctx context.Context, method, path string, query url.Values, body []byte, contentType, accept string, refresh bool) (*http.Response, error) {
+	tok, err := c.accessToken(ctx, refresh)
 	if err != nil {
 		return nil, err
+	}
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
 	}
 	u := c.cfg.BaseURL + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, body)
+	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
 	if err != nil {
 		return nil, err
 	}
@@ -166,17 +251,17 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 
 // doJSON performs an authenticated JSON request and decodes into out (may be nil).
 func (c *Client) doJSON(ctx context.Context, method, path string, query url.Values, reqBody any, out any) error {
-	var rdr io.Reader
+	var raw []byte
 	ct := ""
 	if reqBody != nil {
 		b, err := json.Marshal(reqBody)
 		if err != nil {
 			return err
 		}
-		rdr = bytes.NewReader(b)
+		raw = b
 		ct = "application/json"
 	}
-	resp, err := c.do(ctx, method, path, query, rdr, ct, "application/json")
+	resp, err := c.do(ctx, method, path, query, raw, ct, "application/json")
 	if err != nil {
 		return err
 	}

@@ -30,6 +30,9 @@ type OpsRampSource interface {
 	// DeregisterByHost removes the OpsRamp resource matching host (by IP or
 	// hostname) from the tenant. found is false when no resource matched.
 	DeregisterByHost(ctx context.Context, host string) (found bool, err error)
+	// EnsureToken refreshes the OpsRamp access token when it is missing or
+	// expired.
+	EnsureToken(ctx context.Context) error
 }
 
 // Valid deploy actions.
@@ -114,6 +117,15 @@ func (m *Manager) StartJob(ctx context.Context, req StartRequest) (*model.Deploy
 
 	// The API host is used both for the installer and for preflight reachability.
 	apiHost, key, secret, enabled := m.src.InstallParams()
+
+	// Renew the OpsRamp token up front. A job that fans out over many hosts is
+	// slow and disruptive to fail halfway through, and an expired token is the
+	// common cause: it is rejected with a 407 that reads as an install failure.
+	if enabled {
+		if err := m.src.EnsureToken(ctx); err != nil {
+			return nil, err
+		}
+	}
 
 	// perHost is the action-specific operation applied to each target.
 	var perHost func(ctx context.Context, host string) HostOutcome

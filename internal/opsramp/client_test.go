@@ -3,11 +3,14 @@ package opsramp
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // newTestServer returns a fake OpsRamp API and a client pointed at it.
@@ -139,5 +142,107 @@ func TestAPIErrorSurfacesStatus(t *testing.T) {
 	}
 	if apiErr.Status != http.StatusUnauthorized || !strings.Contains(apiErr.Body, "unauthorized") {
 		t.Errorf("unexpected api error: %+v", apiErr)
+	}
+}
+
+// EnsureToken must re-authenticate when the cached token has expired, and reuse
+// it when it has not.
+func TestEnsureTokenRefreshesExpired(t *testing.T) {
+	var tokenCalls int32
+	c, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tenancy/auth/oauth/token" {
+			atomic.AddInt32(&tokenCalls, 1)
+			writeToken(w)
+			return
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	})
+
+	ctx := context.Background()
+	if err := c.EnsureToken(ctx); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if err := c.EnsureToken(ctx); err != nil {
+		t.Fatalf("ensure (cached): %v", err)
+	}
+	if n := atomic.LoadInt32(&tokenCalls); n != 1 {
+		t.Errorf("expected cached token reuse, got %d token calls", n)
+	}
+
+	c.mu.Lock()
+	c.tokenExpiry = time.Now().Add(-time.Second)
+	c.mu.Unlock()
+	if err := c.EnsureToken(ctx); err != nil {
+		t.Fatalf("ensure (expired): %v", err)
+	}
+	if n := atomic.LoadInt32(&tokenCalls); n != 2 {
+		t.Errorf("expected refresh of expired token, got %d token calls", n)
+	}
+}
+
+// OpsRamp rejects a dead token with 407 InvalidTokenException. The client must
+// re-authenticate and replay the request once, body included.
+func TestRetriesOnceOnRejectedToken(t *testing.T) {
+	var tokenCalls, apiCalls int32
+	c, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tenancy/auth/oauth/token" {
+			n := atomic.AddInt32(&tokenCalls, 1)
+			_ = json.NewEncoder(w).Encode(tokenResponse{
+				AccessToken: "token-" + strconv.Itoa(int(n)), TokenType: "bearer", ExpiresIn: 7199,
+			})
+			return
+		}
+		atomic.AddInt32(&apiCalls, 1)
+		if r.Header.Get("Authorization") != "Bearer token-2" {
+			w.WriteHeader(http.StatusProxyAuthRequired)
+			_, _ = w.Write([]byte(`{"error":"invalid_token","error_description":"Invalid access token"}`))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), "devices") {
+			t.Errorf("request body not replayed on retry: %q", body)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+
+	// Prime the cache with the token the server will reject.
+	if err := c.EnsureToken(context.Background()); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	out, err := c.AssignPolicyDevices(context.Background(), "p1", map[string]any{"devices": []string{"d1"}})
+	if err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	if !strings.Contains(string(out), `"ok":true`) {
+		t.Errorf("unexpected response: %s", out)
+	}
+	if n := atomic.LoadInt32(&apiCalls); n != 2 {
+		t.Errorf("expected 1 retry (2 api calls), got %d", n)
+	}
+	if n := atomic.LoadInt32(&tokenCalls); n != 2 {
+		t.Errorf("expected re-auth after rejection (2 token calls), got %d", n)
+	}
+}
+
+// An implausible expires_in must not pin a token in the cache indefinitely:
+// that is what left the connector stuck on a dead token for weeks.
+func TestTokenTTLIsClamped(t *testing.T) {
+	c, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tenancy/auth/oauth/token" {
+			// e.g. a server reporting milliseconds instead of seconds.
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "t", ExpiresIn: 7199000})
+			return
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	})
+	if err := c.EnsureToken(context.Background()); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	exp, ok := c.TokenExpiry()
+	if !ok {
+		t.Fatal("expected a cached token")
+	}
+	if got := time.Until(exp); got > maxTokenTTL {
+		t.Errorf("token trusted for %s, want at most %s", got, maxTokenTTL)
 	}
 }

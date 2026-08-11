@@ -142,6 +142,9 @@ func (c *Connector) pollLoop(ctx context.Context, client *Client, interval time.
 }
 
 func (c *Connector) syncWith(ctx context.Context, client *Client) (int, error) {
+	if err := client.EnsureToken(ctx); err != nil {
+		return 0, fmt.Errorf("opsramp token refresh: %w", err)
+	}
 	resources, err := client.ListAgentResources(ctx)
 	if err != nil {
 		return 0, err
@@ -233,6 +236,31 @@ func (c *Connector) HasSecret() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.settings.ClientSecret != ""
+}
+
+// EnsureToken checks the active client's access token and refreshes it when it
+// is missing or expired. Agent operations call this first so a stale token
+// surfaces as an up-front error (or is quietly renewed) instead of failing the
+// operation partway through.
+func (c *Connector) EnsureToken(ctx context.Context) error {
+	client, ok := c.CurrentClient()
+	if !ok {
+		return fmt.Errorf("opsramp connector is not enabled")
+	}
+	if err := client.EnsureToken(ctx); err != nil {
+		return fmt.Errorf("opsramp token refresh: %w", err)
+	}
+	return nil
+}
+
+// TokenExpiry reports when the active client's cached token expires. ok is
+// false when the connector is disabled or no token is cached.
+func (c *Connector) TokenExpiry() (time.Time, bool) {
+	client, enabled := c.CurrentClient()
+	if !enabled {
+		return time.Time{}, false
+	}
+	return client.TokenExpiry()
 }
 
 // DeployScript returns the OpsRamp deployAgent.sh installer contents.
